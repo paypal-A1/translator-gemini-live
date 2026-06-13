@@ -16,7 +16,7 @@ const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TO
 let activeCallSid = null;
 let callStartTime = null;
 
-// TABLAS DE CONVERSIÓN AUDIO (Se mantienen idénticas)
+// TABLAS DE CONVERSIÓN AUDIO (INTACTAS)
 const ulawToPcmTable = new Int16Array(256);
 const BIAS = 0x84;
 
@@ -44,7 +44,7 @@ function encodeMuLawSample(pcm) {
     return ~(sign | (exponent << 4) | mantissa) & 0xFF;
 }
 
-// 🔄 CONVERSOR 1: Teléfono/Navegador (8kHz u-law) ➡️ Gemini (16kHz PCM16)
+// 🔄 CONVERSORES DE AUDIO (INTACTOS)
 function twilioToGemini(ulawBuffer) {
     const outBuffer = Buffer.alloc(ulawBuffer.length * 4);
     let outIdx = 0;
@@ -58,7 +58,6 @@ function twilioToGemini(ulawBuffer) {
     return outBuffer.toString('base64');
 }
 
-// 🔄 CONVERSOR 2: Gemini (24kHz PCM16) ➡️ Teléfono/Navegador (8kHz u-law)
 function geminiToTwilio(pcmBase64) {
     const inBuffer = Buffer.from(pcmBase64, 'base64');
     const outBuffer = Buffer.alloc(Math.floor(inBuffer.length / 6)); 
@@ -83,52 +82,21 @@ app.post('/twiml', (req, res) => {
     `);
 });
 
-// ==================== DESCARGA DE CONVERSACIÓN ====================
+// ==================== 🛠️ CORRECCIÓN QUIRÚRGICA: REGISTRO DE CONVERSACIÓN ====================
 let conversacionTemporal = [];
-let bufferProveedor = '';
-let bufferTu = '';
 
-function guardarFragmento(tipo, fragmento) {
-    if (tipo === 'proveedor') {
-        bufferProveedor += fragmento;
-        if (/[.!?;:]\s*$/.test(bufferProveedor)) {
-            conversacionTemporal.push({
-                timestamp: new Date().toISOString(),
-                tipo: 'proveedor',
-                texto: bufferProveedor.trim()
-            });
-            bufferProveedor = '';
-        }
-    } else if (tipo === 'tu') {
-        bufferTu += fragmento;
-        if (/[.!?;:]\s*$/.test(bufferTu)) {
-            conversacionTemporal.push({
-                timestamp: new Date().toISOString(),
-                tipo: 'tu',
-                texto: bufferTu.trim()
-            });
-            bufferTu = '';
-        }
+function guardarFragmento(tipo, textoCompleto) {
+    if (textoCompleto && textoCompleto.trim().length > 0) {
+        conversacionTemporal.push({
+            timestamp: new Date().toISOString(),
+            tipo: tipo,
+            texto: textoCompleto.trim()
+        });
     }
 }
 
 function finalizarConversacion() {
-    if (bufferProveedor && bufferProveedor.trim().length > 0) {
-        conversacionTemporal.push({
-            timestamp: new Date().toISOString(),
-            tipo: 'proveedor',
-            texto: bufferProveedor.trim()
-        });
-    }
-    if (bufferTu && bufferTu.trim().length > 0) {
-        conversacionTemporal.push({
-            timestamp: new Date().toISOString(),
-            tipo: 'tu',
-            texto: bufferTu.trim()
-        });
-    }
-    bufferProveedor = '';
-    bufferTu = '';
+    // Ya no requiere procesar buffers complejos residuales
 }
 
 app.get('/descargar-conversacion', (req, res) => {
@@ -137,7 +105,7 @@ app.get('/descargar-conversacion', (req, res) => {
     if (conversacionTemporal.length === 0) {
         res.setHeader('Content-Type', 'text/plain');
         res.setHeader('Content-Disposition', 'attachment; filename="conversacion_vacia.txt"');
-        return res.send("No hay conversación registrada.");
+        return res.send("No hay conversación registrada aún.");
     }
     
     let contenido = '';
@@ -170,8 +138,6 @@ app.post('/make-call', async (req, res) => {
         callStartTime = Date.now();
         
         conversacionTemporal = [];
-        bufferProveedor = '';
-        bufferTu = '';
         textoInglesAcumulado = '';
         textoEspanolAcumulado = '';
         
@@ -188,7 +154,6 @@ app.post('/hangup', async (req, res) => {
             await client.calls(activeCallSid).update({ status: 'completed' });
             finalizarConversacion();
             
-            // 🛑 CERRAR SESIONES DE GEMINI INMEDIATAMENTE
             if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) {
                 geminiWsToEnglish.close();
                 geminiWsToEnglish = null;
@@ -230,7 +195,6 @@ let twilioWs = null;
 let twilioStreamSid = null;
 let twilioPacketsIn = 0;
 
-// ACUMULADORES GLOBALES PARA EVITAR LOGS INCOMPLETOS O ENTRECORTADOS
 let textoInglesAcumulado = '';
 let textoEspanolAcumulado = '';
 
@@ -262,13 +226,14 @@ function initGeminiToEnglish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["TEXT", "AUDIO"], // 👈 AGREGADO TEXTO PARA EL DIAGNÓSTICO
+                    responseModalities: ["TEXT", "AUDIO"],
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
                 },
+                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Se le ordena generar explícitamente el texto de la traducción
                 systemInstruction: {
-                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from Spanish into fluent English. Respond ONLY with the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
+                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from Spanish into fluent English. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
                 }
             }
         };
@@ -284,10 +249,10 @@ function initGeminiToEnglish() {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
                         if (part.text) {
-                            textoInglesAcumulado += part.text; // Acumular trozo de texto
-                            guardarFragmento('tu', part.text);
+                            textoInglesAcumulado += part.text; // Captura fragmentos de texto
                         }
                         
+                        // AUDIO LOGIC (TOTALMENTE INTACTA)
                         if (part.inlineData && part.inlineData.data) {
                             if (twilioWs && twilioWs.readyState === WebSocket.OPEN && twilioStreamSid) {
                                 const convertedAudio = geminiToTwilio(part.inlineData.data);
@@ -305,11 +270,12 @@ function initGeminiToEnglish() {
                     }
                 }
                 
-                // 📝 IMPRIMIR LOG DE TRADUCCIÓN CUANDO EL MODELO TERMINE LA ORACIÓN
+                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Consola y TXT sincronizados al finalizar la frase
                 if (response.serverContent.turnComplete) {
                     if (textoInglesAcumulado.trim()) {
                         console.log(`🇺🇸 [Traducción al Inglés generada]: ${textoInglesAcumulado.trim()}`);
-                        textoInglesAcumulado = ''; // Limpiar acumulador para el siguiente turno
+                        guardarFragmento('tu', textoInglesAcumulado.trim()); 
+                        textoInglesAcumulado = ''; 
                     }
                 }
             }
@@ -339,13 +305,14 @@ function initGeminiToSpanish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["TEXT", "AUDIO"], // 👈 AGREGADO TEXTO PARA EL DIAGNÓSTICO
+                    responseModalities: ["TEXT", "AUDIO"],
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
                 },
+                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Se le ordena generar explícitamente el texto de la traducción
                 systemInstruction: {
-                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from English into fluent Spanish. Respond ONLY with the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
+                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from English into fluent Spanish. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
                 }
             }
         };
@@ -361,10 +328,10 @@ function initGeminiToSpanish() {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
                         if (part.text) {
-                            textoEspanolAcumulado += part.text; // Acumular trozo de texto
-                            guardarFragmento('proveedor', part.text);
+                            textoEspanolAcumulado += part.text; // Captura fragmentos de texto
                         }
                         
+                        // AUDIO LOGIC (TOTALMENTE INTACTA)
                         if (part.inlineData && part.inlineData.data) {
                             const convertedAudio = geminiToTwilio(part.inlineData.data);
                             console.log('🔊 [AUDIO -> NAVEGADOR]: Reenviando paquete de voz traducido al Español.');
@@ -376,11 +343,12 @@ function initGeminiToSpanish() {
                     }
                 }
                 
-                // 📝 IMPRIMIR LOG DE TRADUCCIÓN CUANDO EL MODELO TERMINE LA ORACIÓN
+                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Consola y TXT sincronizados al finalizar la frase
                 if (response.serverContent.turnComplete) {
                     if (textoEspanolAcumulado.trim()) {
                         console.log(`🇪🇸 [Traducción al Español generada]: ${textoEspanolAcumulado.trim()}`);
-                        textoEspanolAcumulado = ''; // Limpiar acumulador para el siguiente turno
+                        guardarFragmento('proveedor', textoEspanolAcumulado.trim()); 
+                        textoEspanolAcumulado = ''; 
                     }
                 }
             }
@@ -396,7 +364,7 @@ function initGeminiToSpanish() {
     geminiWsToSpanish.on('error', (err) => console.error('Error Canal Español:', err));
 }
 
-// GESTIÓN DE FLUJOS INTERNOS (WebSockets del Servidor)
+// GESTIÓN DE FLUJOS INTERNOS (INTACTO)
 wss.on('connection', (ws, req) => {
     const urlClara = new URL(req.url, `http://${req.headers.host}`);
     const pathname = urlClara.pathname;
