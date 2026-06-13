@@ -82,8 +82,14 @@ app.post('/twiml', (req, res) => {
     `);
 });
 
-// ==================== 🛠️ CORRECCIÓN QUIRÚRGICA: REGISTRO DE CONVERSACIÓN ====================
+// ==================== 🛠️ CORRECCIÓN: REGISTRO DE CONVERSACIÓN CON TIMEOUT ====================
 let conversacionTemporal = [];
+let textoInglesAcumulado = '';
+let textoEspanolAcumulado = '';
+let ultimoTextoEspanol = '';
+let ultimoTextoIngles = '';
+let temporizadorEspanol = null;
+let temporizadorIngles = null;
 
 function guardarFragmento(tipo, textoCompleto) {
     if (textoCompleto && textoCompleto.trim().length > 0) {
@@ -95,8 +101,123 @@ function guardarFragmento(tipo, textoCompleto) {
     }
 }
 
+function resetearTemporizador(tipo) {
+    if (tipo === 'español' && temporizadorEspanol) {
+        clearTimeout(temporizadorEspanol);
+        temporizadorEspanol = null;
+    }
+    if (tipo === 'inglés' && temporizadorIngles) {
+        clearTimeout(temporizadorIngles);
+        temporizadorIngles = null;
+    }
+}
+
+function procesarTextoEspanol(nuevoTexto) {
+    if (!nuevoTexto || nuevoTexto.trim() === '') return;
+    
+    resetearTemporizador('español');
+    
+    // Evitar duplicados consecutivos
+    if (nuevoTexto === ultimoTextoEspanol || (ultimoTextoEspanol && nuevoTexto.includes(ultimoTextoEspanol))) {
+        return;
+    }
+    
+    // Guardar lo acumulado anterior si existe
+    if (textoEspanolAcumulado.trim()) {
+        const textoFinal = textoEspanolAcumulado.trim();
+        console.log(`🇪🇸 [Traducción al Español generada]: ${textoFinal}`);
+        guardarFragmento('proveedor', textoFinal);
+        
+        // Notificar a navegadores (opcional)
+        browserConnections.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ type: 'translation_es', text: textoFinal }));
+            }
+        });
+    }
+    
+    // Iniciar nuevo acumulador
+    textoEspanolAcumulado = nuevoTexto;
+    ultimoTextoEspanol = nuevoTexto;
+    
+    // Timeout de respaldo por si Gemini no envía turnComplete
+    temporizadorEspanol = setTimeout(() => {
+        if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
+            console.log(`🇪🇸 [Traducción al Español - Timeout]: ${textoEspanolAcumulado.trim()}`);
+            guardarFragmento('proveedor', textoEspanolAcumulado.trim());
+            textoEspanolAcumulado = '';
+            ultimoTextoEspanol = '';
+        }
+        temporizadorEspanol = null;
+    }, 2000);
+}
+
+function procesarTextoIngles(nuevoTexto) {
+    if (!nuevoTexto || nuevoTexto.trim() === '') return;
+    
+    resetearTemporizador('inglés');
+    
+    // Evitar duplicados consecutivos
+    if (nuevoTexto === ultimoTextoIngles || (ultimoTextoIngles && nuevoTexto.includes(ultimoTextoIngles))) {
+        return;
+    }
+    
+    // Guardar lo acumulado anterior si existe
+    if (textoInglesAcumulado.trim()) {
+        const textoFinal = textoInglesAcumulado.trim();
+        console.log(`🇺🇸 [Traducción al Inglés generada]: ${textoFinal}`);
+        guardarFragmento('tu', textoFinal);
+        
+        // Notificar a navegadores (opcional)
+        browserConnections.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ type: 'translation_en', text: textoFinal }));
+            }
+        });
+    }
+    
+    // Iniciar nuevo acumulador
+    textoInglesAcumulado = nuevoTexto;
+    ultimoTextoIngles = nuevoTexto;
+    
+    // Timeout de respaldo por si Gemini no envía turnComplete
+    temporizadorIngles = setTimeout(() => {
+        if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
+            console.log(`🇺🇸 [Traducción al Inglés - Timeout]: ${textoInglesAcumulado.trim()}`);
+            guardarFragmento('tu', textoInglesAcumulado.trim());
+            textoInglesAcumulado = '';
+            ultimoTextoIngles = '';
+        }
+        temporizadorIngles = null;
+    }, 2000);
+}
+
 function finalizarConversacion() {
-    // Ya no requiere procesar buffers complejos residuales
+    // Forzar guardado de cualquier texto pendiente
+    if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
+        console.log(`🇺🇸 [Finalizando - Inglés]: ${textoInglesAcumulado.trim()}`);
+        guardarFragmento('tu', textoInglesAcumulado.trim());
+        textoInglesAcumulado = '';
+    }
+    if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
+        console.log(`🇪🇸 [Finalizando - Español]: ${textoEspanolAcumulado.trim()}`);
+        guardarFragmento('proveedor', textoEspanolAcumulado.trim());
+        textoEspanolAcumulado = '';
+    }
+    
+    // Limpiar temporizadores
+    if (temporizadorEspanol) {
+        clearTimeout(temporizadorEspanol);
+        temporizadorEspanol = null;
+    }
+    if (temporizadorIngles) {
+        clearTimeout(temporizadorIngles);
+        temporizadorIngles = null;
+    }
+    
+    // Limpiar tracking de últimos textos
+    ultimoTextoEspanol = '';
+    ultimoTextoIngles = '';
 }
 
 app.get('/descargar-conversacion', (req, res) => {
@@ -140,6 +261,8 @@ app.post('/make-call', async (req, res) => {
         conversacionTemporal = [];
         textoInglesAcumulado = '';
         textoEspanolAcumulado = '';
+        ultimoTextoEspanol = '';
+        ultimoTextoIngles = '';
         
         res.status(200).json({ success: true, callSid: call.sid });
     } catch (error) {
@@ -195,9 +318,6 @@ let twilioWs = null;
 let twilioStreamSid = null;
 let twilioPacketsIn = 0;
 
-let textoInglesAcumulado = '';
-let textoEspanolAcumulado = '';
-
 const browserConnections = new Set();
 
 function broadcastToBrowsers(audioData) {
@@ -231,7 +351,6 @@ function initGeminiToEnglish() {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
                 },
-                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Se le ordena generar explícitamente el texto de la traducción
                 systemInstruction: {
                     parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from Spanish into fluent English. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
                 }
@@ -249,7 +368,8 @@ function initGeminiToEnglish() {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
                         if (part.text) {
-                            textoInglesAcumulado += part.text; // Captura fragmentos de texto
+                            // 🛠️ MODIFICADO: Usar nueva función en lugar de acumulación simple
+                            procesarTextoIngles(part.text);
                         }
                         
                         // AUDIO LOGIC (TOTALMENTE INTACTA)
@@ -270,12 +390,14 @@ function initGeminiToEnglish() {
                     }
                 }
                 
-                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Consola y TXT sincronizados al finalizar la frase
+                // 🛠️ MODIFICADO: También manejar turnComplete como respaldo
                 if (response.serverContent.turnComplete) {
-                    if (textoInglesAcumulado.trim()) {
-                        console.log(`🇺🇸 [Traducción al Inglés generada]: ${textoInglesAcumulado.trim()}`);
-                        guardarFragmento('tu', textoInglesAcumulado.trim()); 
-                        textoInglesAcumulado = ''; 
+                    resetearTemporizador('inglés');
+                    if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
+                        console.log(`🇺🇸 [Traducción al Inglés - turnComplete]: ${textoInglesAcumulado.trim()}`);
+                        guardarFragmento('tu', textoInglesAcumulado.trim());
+                        textoInglesAcumulado = '';
+                        ultimoTextoIngles = '';
                     }
                 }
             }
@@ -310,7 +432,6 @@ function initGeminiToSpanish() {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
                 },
-                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Se le ordena generar explícitamente el texto de la traducción
                 systemInstruction: {
                     parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from English into fluent Spanish. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
                 }
@@ -328,7 +449,8 @@ function initGeminiToSpanish() {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
                         if (part.text) {
-                            textoEspanolAcumulado += part.text; // Captura fragmentos de texto
+                            // 🛠️ MODIFICADO: Usar nueva función en lugar de acumulación simple
+                            procesarTextoEspanol(part.text);
                         }
                         
                         // AUDIO LOGIC (TOTALMENTE INTACTA)
@@ -343,12 +465,14 @@ function initGeminiToSpanish() {
                     }
                 }
                 
-                // 🛠️ MODIFICACIÓN QUIRÚRGICA: Consola y TXT sincronizados al finalizar la frase
+                // 🛠️ MODIFICADO: También manejar turnComplete como respaldo
                 if (response.serverContent.turnComplete) {
-                    if (textoEspanolAcumulado.trim()) {
-                        console.log(`🇪🇸 [Traducción al Español generada]: ${textoEspanolAcumulado.trim()}`);
-                        guardarFragmento('proveedor', textoEspanolAcumulado.trim()); 
-                        textoEspanolAcumulado = ''; 
+                    resetearTemporizador('español');
+                    if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
+                        console.log(`🇪🇸 [Traducción al Español - turnComplete]: ${textoEspanolAcumulado.trim()}`);
+                        guardarFragmento('proveedor', textoEspanolAcumulado.trim());
+                        textoEspanolAcumulado = '';
+                        ultimoTextoEspanol = '';
                     }
                 }
             }
