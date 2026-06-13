@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Consola Traductora de Llamadas</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; background: #f4f7f6; padding: 20px; }
+        .phone-container { max-width: 350px; margin: 0 auto; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .display { width: 100%; height: 50px; font-size: 24px; text-align: center; margin-bottom: 20px; border-radius: 10px; border: 1px solid #ccc; outline: none; box-sizing: border-box; }
+        .keyboard { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+        button { padding: 18px; font-size: 20px; border-radius: 10px; border: none; cursor: pointer; background: #e0e0e0; transition: background 0.1s; }
+        button:active { background: #d0d0d0; }
+        button.call { background: #2ecc71; color: white; grid-column: span 3; margin-top: 5px; }
+        button.hangup { background: #e74c3c; color: white; grid-column: span 3; margin-top: 5px; display: none; }
+        .status { margin-top: 15px; font-size: 14px; font-weight: bold; }
+        .history-section { margin-top: 25px; text-align: left; background: #f9f9f9; padding: 12px; border-radius: 10px; }
+        .history-title { font-size: 13px; font-weight: bold; color: #7f8c8d; margin-bottom: 8px; text-transform: uppercase; }
+        .history-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; background: white; margin-bottom: 5px; border-radius: 6px; border: 1px solid #edeec4; cursor: pointer; font-size: 14px; }
+        .history-item:hover { background: #f1f2f6; }
+        .timer {
+            font-size: 28px;
+            font-weight: bold;
+            text-align: center;
+            margin: 10px 0;
+            padding: 8px;
+            background: #2ecc71;
+            color: white;
+            border-radius: 30px;
+            display: none;
+            font-family: monospace;
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="phone-container">
+    <h2>Traductor Global</h2>
+    <input type="text" id="phoneNumber" class="display" placeholder="+1234567890" />
+    
+    <div class="keyboard">
+        <button onclick="press('1')">1</button><button onclick="press('2')">2</button><button onclick="press('3')">3</button>
+        <button onclick="press('4')">4</button><button onclick="press('5')">5</button><button onclick="press('6')">6</button>
+        <button onclick="press('7')">7</button><button onclick="press('8')">8</button><button onclick="press('9')">9</button>
+        <button onclick="press('+')">+</button><button onclick="press('0')">0</button><button onclick="backspace()">⌫</button>
+        
+        <button id="callBtn" class="call" onclick="startCall()">📞 Iniciar Llamada</button>
+        <button id="hangupBtn" class="hangup" onclick="endCall()">🛑 Finalizar Llamada</button>
+    </div>
+
+    <div id="statusMessage" class="status">Conectando canales...</div>
+    <div id="callTimer" class="timer">00:00</div>
+
+    <div class="history-section">
+        <div class="history-title">🕒 Recientes (Toca para cargar)</div>
+        <div id="historyList"></div>
+    </div>
+</div>
+
+<script>
+    let ws;
+    let audioCtx;
+    let processor;
+    let source;
+    let globalStream;
+    let ultimaDuracion = null;
+    let callStartTimer = null;
+    let timerInterval = null;
+    let micActivationPending = false;
+
+    function press(num) { document.getElementById('phoneNumber').value += num; }
+    
+    function backspace() {
+        let current = document.getElementById('phoneNumber').value;
+        document.getElementById('phoneNumber').value = current.slice(0, -1);
+    }
+
+    function loadHistory() {
+        const history = JSON.parse(localStorage.getItem('phoneHistory')) || [];
+        const container = document.getElementById('historyList');
+        container.innerHTML = '';
+        if(history.length === 0) {
+            container.innerHTML = '<span style="color:#aaa; font-size:12px;">No hay llamadas recientes</span>';
+            return;
+        }
+        history.forEach(item => {
+            const num = item.number;
+            const duration = item.duration ? item.duration : null;
+            const div = document.createElement('div');
+            div.className = 'history-item';
+            div.innerHTML = `<span>${num}</span><span style="color:#2ecc71; font-weight:bold;">${duration ? duration + 's' : '⚡'}</span>`;
+            div.onclick = () => { document.getElementById('phoneNumber').value = num; };
+            container.appendChild(div);
+        });
+    }
+
+    function saveHistory(num, duration) {
+        let history = JSON.parse(localStorage.getItem('phoneHistory')) || [];
+        history.unshift({ number: num, duration: duration, timestamp: Date.now() });
+        if (history.length > 50) history.pop();
+        localStorage.setItem('phoneHistory', JSON.stringify(history));
+        loadHistory();
+    }
+
+    function connectWebSocket() {
+        const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        ws = new WebSocket(protocol + window.location.host + '/browser-stream');
+        
+        ws.onopen = () => {
+            console.log("✅ Navegador: WebSocket conectado");
+            document.getElementById('statusMessage').style.color = '#2ecc71';
+            document.getElementById('statusMessage').innerText = "✅ Sistema Listo y Conectado";
+        };
+        
+        ws.onmessage = async (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'audio' && data.payload) {
+                    console.log("📱 Navegador: Recibido paquete de audio del servidor, longitud:", data.payload.length);
+                    playUlawBase64(data.payload);
+                } else if (data.type === 'call_duration' && data.duration) {
+                    ultimaDuracion = data.duration;
+                    console.log("📊 Duración recibida del servidor:", ultimaDuracion);
+                } else if (data.type === 'twilio_ready') {
+                    console.log("📞 Twilio listo, activando micrófono...");
+                    document.getElementById('statusMessage').innerText = "Llamada en curso...";
+                    await startMicrophone();
+                    // Iniciar contador de tiempo
+                    callStartTimer = Date.now();
+                    const timerDiv = document.getElementById('callTimer');
+                    timerDiv.style.display = 'block';
+                    if (timerInterval) clearInterval(timerInterval);
+                    timerInterval = setInterval(() => {
+                        const elapsed = Math.floor((Date.now() - callStartTimer) / 1000);
+                        const mins = Math.floor(elapsed / 60);
+                        const secs = elapsed % 60;
+                        timerDiv.textContent = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                    }, 1000);
+                } else {
+                    console.log("📩 Navegador: Mensaje recibido tipo:", data.type);
+                }
+            } catch(e) { 
+                console.error("❌ Navegador: Error al parsear mensaje:", e);
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("⚠️ Navegador: WebSocket cerrado");
+            document.getElementById('statusMessage').style.color = '#e74c3c';
+            document.getElementById('statusMessage').innerText = "⚠️ Sistema no disponible";
+            setTimeout(connectWebSocket, 3000);
+        };
+        
+        ws.onerror = (err) => {
+            console.error("❌ Navegador: Error en WebSocket:", err);
+        };
+    }
+
+    async function startMicrophone() {
+        try {
+            globalStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+            console.log("✅ Navegador: Micrófono activado");
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
+            }
+            source = audioCtx.createMediaStreamSource(globalStream);
+            processor = audioCtx.createScriptProcessor(2048, 1, 1);
+
+            source.connect(processor);
+            processor.connect(audioCtx.destination);
+
+            processor.onaudioprocess = (e) => {
+                const inputData = e.inputBuffer.getChannelData(0);
+                const ulawBytes = new Uint8Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    let sample = Math.min(1, Math.max(-1, inputData[i])) * 32767;
+                    ulawBytes[i] = linear2ulaw(sample);
+                }
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    const base64Audio = btoa(String.fromCharCode.apply(null, ulawBytes));
+                    ws.send(base64Audio);
+                }
+            };
+        } catch (err) {
+            alert("Por favor permite el acceso al micrófono.");
+        }
+    }
+
+    function stopMicrophone() {
+        if (globalStream) globalStream.getTracks().forEach(track => track.stop());
+        if (processor) processor.disconnect();
+        if (source) source.disconnect();
+        console.log("🔴 Navegador: Micrófono detenido");
+    }
+
+    function linear2ulaw(sample) {
+        let sign = (sample >> 8) & 0x80;
+        if (sample < 0) { sample = -sample; sign = 0x80; }
+        if (sample > 32635) sample = 32635;
+        sample += 0x84;
+        let exponent = 7;
+        for (let bit = 0x4000; (sample & bit) === 0 && exponent > 0; bit >>= 1) { exponent--; }
+        let mantissa = (sample >> (exponent + 3)) & 0x0F;
+        return ~(sign | (exponent << 4) | mantissa) & 0xFF;
+    }
+
+    function ulaw2linear(ulaw) {
+        ulaw = ~ulaw & 0xFF;
+        let sign = (ulaw & 0x80);
+        let exponent = (ulaw >> 4) & 0x07;
+        let mantissa = ulaw & 0x0F;
+        let sample = (mantissa << 3) + 132;
+        sample <<= exponent;
+        sample -= 132;
+        return sign ? -sample : sample;
+    }
+
+    function playUlawBase64(base64Data) {
+        console.log("🔊 Navegador: Iniciando reproducción de audio...");
+        
+        if (!audioCtx) {
+            console.log("📁 Navegador: Creando nuevo AudioContext");
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        
+        if (audioCtx.state === 'suspended') {
+            console.log("⚠️ Navegador: AudioContext suspendido, reanudando...");
+            audioCtx.resume().then(() => {
+                console.log("✅ Navegador: AudioContext reanudado correctamente");
+            }).catch(e => {
+                console.error("❌ Navegador: Error al reanudar AudioContext:", e);
+            });
+        } else {
+            console.log("✅ Navegador: AudioContext activo, estado:", audioCtx.state);
+        }
+        
+        try {
+            const binaryString = atob(base64Data);
+            const len = binaryString.length;
+            console.log(`📊 Navegador: Decodificando ${len} bytes de audio ulaw`);
+            
+            const float32Data = new Float32Array(len);
+            for (let i = 0; i < len; i++) {
+                float32Data[i] = ulaw2linear(binaryString.charCodeAt(i)) / 32768;
+            }
+            
+            const audioBuffer = audioCtx.createBuffer(1, len, 8000);
+            audioBuffer.getChannelData(0).set(float32Data);
+            
+            const bufferSource = audioCtx.createBufferSource();
+            bufferSource.buffer = audioBuffer;
+            bufferSource.connect(audioCtx.destination);
+            bufferSource.start();
+            
+            console.log("✅ Navegador: Audio enviado a los altavoces");
+        } catch (e) {
+            console.error("❌ Navegador: Error reproduciendo audio:", e);
+        }
+    }
+
+    async function startCall() {
+        const number = document.getElementById('phoneNumber').value;
+        if(!number) return alert("Escribe un número válido");
+        
+        document.getElementById('callBtn').style.display = 'none';
+        document.getElementById('hangupBtn').style.display = 'block';
+        document.getElementById('statusMessage').innerText = "Marcando...";
+        
+        saveHistory(number);
+        
+        // NO activar micrófono aquí - se activará cuando llegue 'twilio_ready'
+        
+        try {
+            const response = await fetch('/make-call', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ toPhoneNumber: number })
+            });
+            
+            const result = await response.json();
+            if(result.success) {
+                document.getElementById('statusMessage').innerText = "Esperando conexión...";
+            } else {
+                alert("Error de Twilio: " + result.error);
+                resetButtons();
+            }
+        } catch (error) {
+            alert("Error de red al enlazar llamada.");
+            resetButtons();
+        }
+    }
+
+    async function endCall() {
+        const number = document.getElementById('phoneNumber').value;
+        document.getElementById('statusMessage').innerText = "Cortando conexión...";
+        
+        if (timerInterval) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+        }
+        const timerDiv = document.getElementById('callTimer');
+        timerDiv.style.display = 'none';
+        timerDiv.textContent = '00:00';
+        callStartTimer = null;
+        
+        try {
+            await fetch('/hangup', { method: 'POST' });
+        } catch(e) { console.error(e); }
+        stopMicrophone();
+        resetButtons();
+        document.getElementById('statusMessage').style.color = '#2ecc71';
+        document.getElementById('statusMessage').innerText = "Llamada finalizada de forma segura.";
+        
+        setTimeout(() => {
+            if (ultimaDuracion) {
+                saveHistory(number, ultimaDuracion);
+                ultimaDuracion = null;
+            } else {
+                saveHistory(number, null);
+            }
+        }, 500);
+        
+        setTimeout(async () => {
+            try {
+                const response = await fetch('/descargar-conversacion');
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `conversacion_${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.txt`;
+                a.click();
+                URL.revokeObjectURL(url);
+                console.log("✅ Conversación descargada automáticamente");
+            } catch(e) { 
+                console.error("Error al descargar conversación:", e); 
+            }
+        }, 500);
+    }
+
+    function resetButtons() {
+        document.getElementById('callBtn').style.display = 'block';
+        document.getElementById('hangupBtn').style.display = 'none';
+    }
+
+    window.onload = () => {
+        connectWebSocket();
+        loadHistory();
+    };
+</script>
+</body>
+</html>
