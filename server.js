@@ -117,10 +117,8 @@ function procesarTextoEspanol(nuevoTexto) {
     
     resetearTemporizador('español');
     
-    // Acumular el texto
     textoEspanolAcumulado += nuevoTexto;
     
-    // Si hay puntuación que indica fin de frase, guardar inmediatamente
     if (/[.!?;:]$/.test(nuevoTexto.trim())) {
         if (textoEspanolAcumulado.trim()) {
             const textoFinal = textoEspanolAcumulado.trim();
@@ -130,7 +128,6 @@ function procesarTextoEspanol(nuevoTexto) {
         }
         resetearTemporizador('español');
     } else {
-        // Temporizador de respaldo
         temporizadorEspanol = setTimeout(() => {
             if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
                 console.log(`🇪🇸 [TRADUCCIÓN ESPAÑOL - TIMEOUT]: ${textoEspanolAcumulado.trim()}`);
@@ -149,10 +146,8 @@ function procesarTextoIngles(nuevoTexto) {
     
     resetearTemporizador('inglés');
     
-    // Acumular el texto
     textoInglesAcumulado += nuevoTexto;
     
-    // Si hay puntuación que indica fin de frase, guardar inmediatamente
     if (/[.!?;:]$/.test(nuevoTexto.trim())) {
         if (textoInglesAcumulado.trim()) {
             const textoFinal = textoInglesAcumulado.trim();
@@ -162,7 +157,6 @@ function procesarTextoIngles(nuevoTexto) {
         }
         resetearTemporizador('inglés');
     } else {
-        // Temporizador de respaldo
         temporizadorIngles = setTimeout(() => {
             if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
                 console.log(`🇺🇸 [TRADUCCIÓN INGLÉS - TIMEOUT]: ${textoInglesAcumulado.trim()}`);
@@ -314,11 +308,7 @@ function initGeminiToEnglish() {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
                     responseModalities: ["AUDIO"],
-                    outputAudioTranscription: {},
-                    translationConfig: {
-                        targetLanguageCode: "en",
-                        echoTargetLanguage: true
-                    }
+                    outputAudioTranscription: {}   // <--- CAMBIO: agregado
                 }
             }
         };
@@ -329,12 +319,11 @@ function initGeminiToEnglish() {
         try {
             const response = JSON.parse(message);
             
-            // Capturar texto de la traducción (output transcription)
+            // <--- CAMBIO: capturar texto de la traducción
             if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
                 procesarTextoIngles(response.serverContent.outputTranscription.text);
             }
             
-            // Procesar audio
             if (response.serverContent && response.serverContent.modelTurn && response.serverContent.modelTurn.parts) {
                 for (const part of response.serverContent.modelTurn.parts) {
                     if (part.inlineData && part.inlineData.data) {
@@ -350,7 +339,6 @@ function initGeminiToEnglish() {
                 }
             }
             
-            // Turno completo - forzar guardado
             if (response.serverContent && response.serverContent.turnComplete) {
                 resetearTemporizador('inglés');
                 if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
@@ -386,11 +374,7 @@ function initGeminiToSpanish() {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
                     responseModalities: ["AUDIO"],
-                    outputAudioTranscription: {},
-                    translationConfig: {
-                        targetLanguageCode: "es",
-                        echoTargetLanguage: true
-                    }
+                    outputAudioTranscription: {}   // <--- CAMBIO: agregado
                 }
             }
         };
@@ -401,12 +385,11 @@ function initGeminiToSpanish() {
         try {
             const response = JSON.parse(message);
             
-            // Capturar texto de la traducción (output transcription)
+            // <--- CAMBIO: capturar texto de la traducción
             if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
                 procesarTextoEspanol(response.serverContent.outputTranscription.text);
             }
             
-            // Procesar audio y enviar a navegadores
             if (response.serverContent && response.serverContent.modelTurn && response.serverContent.modelTurn.parts) {
                 for (const part of response.serverContent.modelTurn.parts) {
                     if (part.inlineData && part.inlineData.data) {
@@ -416,7 +399,6 @@ function initGeminiToSpanish() {
                 }
             }
             
-            // Turno completo - forzar guardado
             if (response.serverContent && response.serverContent.turnComplete) {
                 resetearTemporizador('español');
                 if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
@@ -437,7 +419,7 @@ function initGeminiToSpanish() {
     geminiWsToSpanish.on('error', (err) => console.error('Error Canal Español:', err));
 }
 
-// ==================== WEBSOCKETS PARA CONEXIONES EXTERNAS ====================
+// ==================== WEBSOCKETS ====================
 wss.on('connection', (ws, req) => {
     const urlClara = new URL(req.url, `http://${req.headers.host}`);
     const pathname = urlClara.pathname;
