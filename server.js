@@ -347,6 +347,7 @@ function initGeminiToEnglish() {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
                     responseModalities: ["TEXT", "AUDIO"],
+                    outputAudioTranscription: {},  // <--- ÚNICO CAMBIO AGREGADO
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
@@ -363,12 +364,16 @@ function initGeminiToEnglish() {
         try {
             const response = JSON.parse(message);
             
+            // <--- NUEVA CAPTURA DE TEXTO (no afecta el audio)
+            if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
+                procesarTextoIngles(response.serverContent.outputTranscription.text);
+            }
+            
             if (response.serverContent) {
                 if (response.serverContent.modelTurn) {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
                         if (part.text) {
-                            // 🛠️ MODIFICADO: Usar nueva función en lugar de acumulación simple
                             procesarTextoIngles(part.text);
                         }
                         
@@ -390,7 +395,6 @@ function initGeminiToEnglish() {
                     }
                 }
                 
-                // 🛠️ MODIFICADO: También manejar turnComplete como respaldo
                 if (response.serverContent.turnComplete) {
                     resetearTemporizador('inglés');
                     if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
@@ -428,6 +432,7 @@ function initGeminiToSpanish() {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
                     responseModalities: ["TEXT", "AUDIO"],
+                    outputAudioTranscription: {},  // <--- ÚNICO CAMBIO AGREGADO
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
@@ -444,12 +449,16 @@ function initGeminiToSpanish() {
         try {
             const response = JSON.parse(message);
             
+            // <--- NUEVA CAPTURA DE TEXTO (no afecta el audio)
+            if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
+                procesarTextoEspanol(response.serverContent.outputTranscription.text);
+            }
+            
             if (response.serverContent) {
                 if (response.serverContent.modelTurn) {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
                         if (part.text) {
-                            // 🛠️ MODIFICADO: Usar nueva función en lugar de acumulación simple
                             procesarTextoEspanol(part.text);
                         }
                         
@@ -465,7 +474,6 @@ function initGeminiToSpanish() {
                     }
                 }
                 
-                // 🛠️ MODIFICADO: También manejar turnComplete como respaldo
                 if (response.serverContent.turnComplete) {
                     resetearTemporizador('español');
                     if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
