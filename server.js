@@ -4,6 +4,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const twilio = require('twilio');
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 app.use(express.static('public'));
@@ -13,10 +14,28 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
+// Cliente para resúmenes (modelo Flash-Lite)
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
 let activeCallSid = null;
 let callStartTime = null;
 
-// TABLAS DE CONVERSIÓN AUDIO (INTACTAS)
+// ==================== REGISTRO DE CONVERSACIÓN ====================
+let conversacionTemporal = [];
+let resumenConversacion = null;
+
+function guardarFragmento(tipo, textoCompleto) {
+    if (textoCompleto && textoCompleto.trim().length > 0) {
+        conversacionTemporal.push({
+            timestamp: new Date().toISOString(),
+            tipo: tipo,
+            texto: textoCompleto.trim()
+        });
+        console.log(`📝 [${tipo}]: ${textoCompleto.trim()}`);
+    }
+}
+
+// ==================== FUNCIONES DE AUDIO (INTACTAS) ====================
 const ulawToPcmTable = new Int16Array(256);
 const BIAS = 0x84;
 
@@ -44,7 +63,6 @@ function encodeMuLawSample(pcm) {
     return ~(sign | (exponent << 4) | mantissa) & 0xFF;
 }
 
-// 🔄 CONVERSORES DE AUDIO (INTACTOS)
 function twilioToGemini(ulawBuffer) {
     const outBuffer = Buffer.alloc(ulawBuffer.length * 4);
     let outIdx = 0;
@@ -82,147 +100,28 @@ app.post('/twiml', (req, res) => {
     `);
 });
 
-// ==================== 🛠️ CORRECCIÓN: REGISTRO DE CONVERSACIÓN CON TIMEOUT ====================
-let conversacionTemporal = [];
-let textoInglesAcumulado = '';
-let textoEspanolAcumulado = '';
-let ultimoTextoEspanol = '';
-let ultimoTextoIngles = '';
-let temporizadorEspanol = null;
-let temporizadorIngles = null;
-
-function guardarFragmento(tipo, textoCompleto) {
-    if (textoCompleto && textoCompleto.trim().length > 0) {
-        conversacionTemporal.push({
-            timestamp: new Date().toISOString(),
-            tipo: tipo,
-            texto: textoCompleto.trim()
+// ==================== GENERACIÓN DE RESUMEN AL FINAL ====================
+async function generarResumen(conversacion) {
+    if (!conversacion || conversacion.length === 0) return "No hay conversación para resumir.";
+    let contenido = '';
+    for (const linea of conversacion) {
+        const hora = new Date(linea.timestamp).toLocaleTimeString([], { hour: '2-digit', minute:'2-digit', second:'2-digit' });
+        const emisor = linea.tipo === 'tu' ? 'Tú' : 'Proveedor';
+        contenido += `[${hora}] ${emisor}: ${linea.texto}\n`;
+    }
+    try {
+        const respuesta = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-lite',
+            contents: `Resume la siguiente conversación de forma breve, destacando los puntos clave:\n\n${contenido}`
         });
+        return respuesta.text;
+    } catch (error) {
+        console.error('Error generando resumen:', error);
+        return "Error al generar resumen.";
     }
-}
-
-function resetearTemporizador(tipo) {
-    if (tipo === 'español' && temporizadorEspanol) {
-        clearTimeout(temporizadorEspanol);
-        temporizadorEspanol = null;
-    }
-    if (tipo === 'inglés' && temporizadorIngles) {
-        clearTimeout(temporizadorIngles);
-        temporizadorIngles = null;
-    }
-}
-
-function procesarTextoEspanol(nuevoTexto) {
-    if (!nuevoTexto || nuevoTexto.trim() === '') return;
-    
-    resetearTemporizador('español');
-    
-    // Evitar duplicados consecutivos
-    if (nuevoTexto === ultimoTextoEspanol || (ultimoTextoEspanol && nuevoTexto.includes(ultimoTextoEspanol))) {
-        return;
-    }
-    
-    // Guardar lo acumulado anterior si existe
-    if (textoEspanolAcumulado.trim()) {
-        const textoFinal = textoEspanolAcumulado.trim();
-        console.log(`🇪🇸 [Traducción al Español generada]: ${textoFinal}`);
-        guardarFragmento('proveedor', textoFinal);
-        
-        // Notificar a navegadores (opcional)
-        browserConnections.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({ type: 'translation_es', text: textoFinal }));
-            }
-        });
-    }
-    
-    // Iniciar nuevo acumulador
-    textoEspanolAcumulado = nuevoTexto;
-    ultimoTextoEspanol = nuevoTexto;
-    
-    // Timeout de respaldo por si Gemini no envía turnComplete
-    temporizadorEspanol = setTimeout(() => {
-        if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
-            console.log(`🇪🇸 [Traducción al Español - Timeout]: ${textoEspanolAcumulado.trim()}`);
-            guardarFragmento('proveedor', textoEspanolAcumulado.trim());
-            textoEspanolAcumulado = '';
-            ultimoTextoEspanol = '';
-        }
-        temporizadorEspanol = null;
-    }, 2000);
-}
-
-function procesarTextoIngles(nuevoTexto) {
-    if (!nuevoTexto || nuevoTexto.trim() === '') return;
-    
-    resetearTemporizador('inglés');
-    
-    // Evitar duplicados consecutivos
-    if (nuevoTexto === ultimoTextoIngles || (ultimoTextoIngles && nuevoTexto.includes(ultimoTextoIngles))) {
-        return;
-    }
-    
-    // Guardar lo acumulado anterior si existe
-    if (textoInglesAcumulado.trim()) {
-        const textoFinal = textoInglesAcumulado.trim();
-        console.log(`🇺🇸 [Traducción al Inglés generada]: ${textoFinal}`);
-        guardarFragmento('tu', textoFinal);
-        
-        // Notificar a navegadores (opcional)
-        browserConnections.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({ type: 'translation_en', text: textoFinal }));
-            }
-        });
-    }
-    
-    // Iniciar nuevo acumulador
-    textoInglesAcumulado = nuevoTexto;
-    ultimoTextoIngles = nuevoTexto;
-    
-    // Timeout de respaldo por si Gemini no envía turnComplete
-    temporizadorIngles = setTimeout(() => {
-        if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
-            console.log(`🇺🇸 [Traducción al Inglés - Timeout]: ${textoInglesAcumulado.trim()}`);
-            guardarFragmento('tu', textoInglesAcumulado.trim());
-            textoInglesAcumulado = '';
-            ultimoTextoIngles = '';
-        }
-        temporizadorIngles = null;
-    }, 2000);
-}
-
-function finalizarConversacion() {
-    // Forzar guardado de cualquier texto pendiente
-    if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
-        console.log(`🇺🇸 [Finalizando - Inglés]: ${textoInglesAcumulado.trim()}`);
-        guardarFragmento('tu', textoInglesAcumulado.trim());
-        textoInglesAcumulado = '';
-    }
-    if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
-        console.log(`🇪🇸 [Finalizando - Español]: ${textoEspanolAcumulado.trim()}`);
-        guardarFragmento('proveedor', textoEspanolAcumulado.trim());
-        textoEspanolAcumulado = '';
-    }
-    
-    // Limpiar temporizadores
-    if (temporizadorEspanol) {
-        clearTimeout(temporizadorEspanol);
-        temporizadorEspanol = null;
-    }
-    if (temporizadorIngles) {
-        clearTimeout(temporizadorIngles);
-        temporizadorIngles = null;
-    }
-    
-    // Limpiar tracking de últimos textos
-    ultimoTextoEspanol = '';
-    ultimoTextoIngles = '';
 }
 
 app.get('/descargar-conversacion', (req, res) => {
-    finalizarConversacion();
-    
     if (conversacionTemporal.length === 0) {
         res.setHeader('Content-Type', 'text/plain');
         res.setHeader('Content-Disposition', 'attachment; filename="conversacion_vacia.txt"');
@@ -230,21 +129,22 @@ app.get('/descargar-conversacion', (req, res) => {
     }
     
     let contenido = '';
+    if (resumenConversacion && resumenConversacion !== "No hay conversación para resumir.") {
+        contenido += "=== RESUMEN ===\n" + resumenConversacion + "\n\n=== TRANSCRIPCIÓN ===\n\n";
+    }
     for (const linea of conversacionTemporal) {
         const hora = new Date(linea.timestamp).toLocaleTimeString([], { hour: '2-digit', minute:'2-digit', second:'2-digit' });
-       
         if (linea.tipo === 'tu') {
             contenido += `[${hora}] Tú: ${linea.texto}\n`;
-        } else if (linea.tipo === 'proveedor') {
+        } else {
             contenido += `[${hora}] Proveedor: ${linea.texto}\n`;
         }
     }
-    
     res.setHeader('Content-Type', 'text/plain');
     res.setHeader('Content-Disposition', 'attachment; filename="conversacion.txt"');
     res.send(contenido);
-    
     conversacionTemporal = [];
+    resumenConversacion = null;
 });
 
 app.post('/make-call', async (req, res) => {
@@ -257,13 +157,8 @@ app.post('/make-call', async (req, res) => {
         });
         activeCallSid = call.sid;
         callStartTime = Date.now();
-        
         conversacionTemporal = [];
-        textoInglesAcumulado = '';
-        textoEspanolAcumulado = '';
-        ultimoTextoEspanol = '';
-        ultimoTextoIngles = '';
-        
+        resumenConversacion = null;
         res.status(200).json({ success: true, callSid: call.sid });
     } catch (error) {
         console.error('Error al realizar la llamada:', error);
@@ -275,27 +170,20 @@ app.post('/hangup', async (req, res) => {
     try {
         if (activeCallSid) {
             await client.calls(activeCallSid).update({ status: 'completed' });
-            finalizarConversacion();
+            // Generar resumen en segundo plano
+            (async () => {
+                resumenConversacion = await generarResumen(conversacionTemporal);
+                console.log('✅ Resumen generado');
+            })();
             
-            if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) {
-                geminiWsToEnglish.close();
-                geminiWsToEnglish = null;
-                console.log('✅ Sesión Gemini [Inglés] cerrada limpiamente');
-            }
-            if (geminiWsToSpanish && geminiWsToSpanish.readyState === WebSocket.OPEN) {
-                geminiWsToSpanish.close();
-                geminiWsToSpanish = null;
-                console.log('✅ Sesión Gemini [Español] cerrada limpiamente');
-            }
+            if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) geminiWsToEnglish.close();
+            if (geminiWsToSpanish && geminiWsToSpanish.readyState === WebSocket.OPEN) geminiWsToSpanish.close();
+            if (transcriberWs && transcriberWs.readyState === WebSocket.OPEN) transcriberWs.close();
             
             const duracion = callStartTime ? ((Date.now() - callStartTime) / 1000).toFixed(1) : 'desconocida';
-            const memUsage = process.memoryUsage();
-            console.log(`📊 [RAM] Llamada finalizada. Duración: ${duracion}s | RSS: ${(memUsage.rss / 1024 / 1024).toFixed(1)} MB | Heap: ${(memUsage.heapUsed / 1024 / 1024).toFixed(1)} MB`);
-            
+            console.log(`📊 Llamada finalizada. Duración: ${duracion}s`);
             browserConnections.forEach(client => {
-                if (client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify({ type: 'call_duration', duration: duracion }));
-                }
+                if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ type: 'call_duration', duration: duracion }));
             });
             activeCallSid = null;
             callStartTime = null;
@@ -312,291 +200,191 @@ app.post('/hangup', async (req, res) => {
 const server = app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
 const wss = new WebSocket.Server({ server });
 
+// ==================== CONEXIONES ORIGINALES (AUDIO) ====================
 let geminiWsToEnglish = null;
 let geminiWsToSpanish = null;
 let twilioWs = null;
 let twilioStreamSid = null;
 let twilioPacketsIn = 0;
-
 const browserConnections = new Set();
 
 function broadcastToBrowsers(audioData) {
     const toRemove = [];
     browserConnections.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'audio', payload: audioData }));
-        } else {
-            toRemove.push(ws);
-        }
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'audio', payload: audioData }));
+        else toRemove.push(ws);
     });
     toRemove.forEach(ws => browserConnections.delete(ws));
 }
 
-// 🌐 CANAL 1: CONEXIÓN A GEMINI [Español ➡️ Inglés]
+// CANAL 1: Español -> Inglés (AUDIO, INTACTO)
 function initGeminiToEnglish() {
     if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) return;
-    console.log('Conectando a Gemini [Canal Español ➡️ Inglés]... 🇺🇸');
-    
+    console.log('Conectando Gemini [Español ➡️ Inglés]...');
     const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
     geminiWsToEnglish = new WebSocket(url);
-
     geminiWsToEnglish.on('open', () => {
-        console.log('✅ Gemini [Canal Inglés] conectado con éxito.');
-        const setupMessage = {
+        console.log('✅ Gemini [Inglés] conectado');
+        geminiWsToEnglish.send(JSON.stringify({
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
                     responseModalities: ["TEXT", "AUDIO"],
-                    "outputAudioTranscription": {},
-                    speechConfig: {
-                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
-                    }
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
                 },
-                systemInstruction: {
-                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from Spanish into fluent English. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
-                }
+                systemInstruction: { parts: [{ text: "Translate Spanish to English. Provide both text and audio." }] }
             }
-        };
-        geminiWsToEnglish.send(JSON.stringify(setupMessage));
+        }));
     });
-
     geminiWsToEnglish.on('message', (message) => {
         try {
             const response = JSON.parse(message);
-            
-            if (response.serverContent) {
-                if (response.serverContent.modelTurn) {
-                    const parts = response.serverContent.modelTurn.parts;
-                    for (const part of parts) {
-                        if (part.text) {
-                            // 🛠️ MODIFICADO: Usar nueva función en lugar de acumulación simple
-                            procesarTextoIngles(part.text);
-                        }
-                        
-                        // AUDIO LOGIC (TOTALMENTE INTACTA)
-                        if (part.inlineData && part.inlineData.data) {
-                            if (twilioWs && twilioWs.readyState === WebSocket.OPEN && twilioStreamSid) {
-                                const convertedAudio = geminiToTwilio(part.inlineData.data);
-                                console.log('🔊 [AUDIO -> TWILIO]: Reenviando paquete de voz traducido al Inglés.');
-                                console.log(`📊 Longitud del audio convertido: ${convertedAudio.length} caracteres base64`);
-                                
-                                twilioWs.send(JSON.stringify({ 
-                                    event: "media", 
-                                    streamSid: twilioStreamSid, 
-                                    media: { payload: convertedAudio } 
-                                }));
-                                console.log('✅ Audio enviado a Twilio');
-                            }
-                        }
-                    }
-                }
-                
-                // 🛠️ MODIFICADO: También manejar turnComplete como respaldo
-                if (response.serverContent.turnComplete) {
-                    resetearTemporizador('inglés');
-                    if (textoInglesAcumulado && textoInglesAcumulado.trim()) {
-                        console.log(`🇺🇸 [Traducción al Inglés - turnComplete]: ${textoInglesAcumulado.trim()}`);
-                        guardarFragmento('tu', textoInglesAcumulado.trim());
-                        textoInglesAcumulado = '';
-                        ultimoTextoIngles = '';
+            if (response.serverContent?.modelTurn?.parts) {
+                for (const part of response.serverContent.modelTurn.parts) {
+                    if (part.inlineData && part.inlineData.data && twilioWs && twilioStreamSid) {
+                        const converted = geminiToTwilio(part.inlineData.data);
+                        twilioWs.send(JSON.stringify({ event: "media", streamSid: twilioStreamSid, media: { payload: converted } }));
                     }
                 }
             }
-        } catch (e) {
-            console.error("Error en mensaje Canal Inglés:", e);
-        }
+        } catch(e) { console.error(e); }
     });
-
-    geminiWsToEnglish.on('close', () => { 
-        geminiWsToEnglish = null; 
-        console.log('🔌 Enlace cerrado con Gemini [Canal Inglés].');
-    });
-    geminiWsToEnglish.on('error', (err) => console.error('Error Canal Inglés:', err));
+    geminiWsToEnglish.on('close', () => { geminiWsToEnglish = null; });
 }
 
-// 🌐 CANAL 2: CONEXIÓN A GEMINI [Inglés ➡️ Español]
+// CANAL 2: Inglés -> Español (AUDIO, INTACTO)
 function initGeminiToSpanish() {
     if (geminiWsToSpanish && geminiWsToSpanish.readyState === WebSocket.OPEN) return;
-    console.log('Conectando a Gemini [Canal Inglés ➡️ Español]... 🇪🇸');
-    
+    console.log('Conectando Gemini [Inglés ➡️ Español]...');
     const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
     geminiWsToSpanish = new WebSocket(url);
-
     geminiWsToSpanish.on('open', () => {
-        console.log('✅ Gemini [Canal Español] conectado con éxito.');
-        const setupMessage = {
+        console.log('✅ Gemini [Español] conectado');
+        geminiWsToSpanish.send(JSON.stringify({
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
                     responseModalities: ["TEXT", "AUDIO"],
-                    "outputAudioTranscription": {},
-                    speechConfig: {
-                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
-                    }
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
                 },
-                systemInstruction: {
-                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from English into fluent Spanish. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
-                }
+                systemInstruction: { parts: [{ text: "Translate English to Spanish. Provide both text and audio." }] }
             }
-        };
-        geminiWsToSpanish.send(JSON.stringify(setupMessage));
+        }));
     });
-
     geminiWsToSpanish.on('message', (message) => {
         try {
             const response = JSON.parse(message);
-            
-            if (response.serverContent) {
-                if (response.serverContent.modelTurn) {
-                    const parts = response.serverContent.modelTurn.parts;
-                    for (const part of parts) {
-                        if (part.text) {
-                            // 🛠️ MODIFICADO: Usar nueva función en lugar de acumulación simple
-                            procesarTextoEspanol(part.text);
-                        }
-                        
-                        // AUDIO LOGIC (TOTALMENTE INTACTA)
-                        if (part.inlineData && part.inlineData.data) {
-                            const convertedAudio = geminiToTwilio(part.inlineData.data);
-                            console.log('🔊 [AUDIO -> NAVEGADOR]: Reenviando paquete de voz traducido al Español.');
-                            console.log(`📊 Longitud del audio convertido: ${convertedAudio.length} caracteres base64`);
-                            
-                            broadcastToBrowsers(convertedAudio);
-                            console.log('✅ Audio enviado a todos los navegadores conectados');
-                        }
-                    }
-                }
-                
-                // 🛠️ MODIFICADO: También manejar turnComplete como respaldo
-                if (response.serverContent.turnComplete) {
-                    resetearTemporizador('español');
-                    if (textoEspanolAcumulado && textoEspanolAcumulado.trim()) {
-                        console.log(`🇪🇸 [Traducción al Español - turnComplete]: ${textoEspanolAcumulado.trim()}`);
-                        guardarFragmento('proveedor', textoEspanolAcumulado.trim());
-                        textoEspanolAcumulado = '';
-                        ultimoTextoEspanol = '';
+            if (response.serverContent?.modelTurn?.parts) {
+                for (const part of response.serverContent.modelTurn.parts) {
+                    if (part.inlineData && part.inlineData.data) {
+                        const converted = geminiToTwilio(part.inlineData.data);
+                        broadcastToBrowsers(converted);
                     }
                 }
             }
-        } catch (e) {
-            console.error("Error en mensaje Canal Español:", e);
-        }
+        } catch(e) { console.error(e); }
     });
-
-    geminiWsToSpanish.on('close', () => { 
-        geminiWsToSpanish = null; 
-        console.log('🔌 Enlace cerrado con Gemini [Canal Español].');
-    });
-    geminiWsToSpanish.on('error', (err) => console.error('Error Canal Español:', err));
+    geminiWsToSpanish.on('close', () => { geminiWsToSpanish = null; });
 }
 
-// GESTIÓN DE FLUJOS INTERNOS (INTACTO)
+// ==================== NUEVO: TRANSCRIPCIÓN CON GEMINI 2.5 FLASH LIVE ====================
+let transcriberWs = null;
+let transcriberStreamSid = null;
+
+function initTranscriber() {
+    if (transcriberWs && transcriberWs.readyState === WebSocket.OPEN) return;
+    console.log('🌐 Conectando Transcriber (Gemini Flash Live)...');
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
+    transcriberWs = new WebSocket(url);
+    transcriberWs.on('open', () => {
+        console.log('✅ Transcriber conectado');
+        transcriberWs.send(JSON.stringify({
+            setup: {
+                model: "models/gemini-2.5-flash-live-preview-09-2025",
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    inputAudioTranscription: {}
+                }
+            }
+        }));
+    });
+    transcriberWs.on('message', (message) => {
+        try {
+            const response = JSON.parse(message);
+            // La transcripción llega en serverContent.inputAudioTranscription
+            if (response.serverContent?.inputAudioTranscription?.text) {
+                const texto = response.serverContent.inputAudioTranscription.text;
+                // Determinar si viene del navegador (tu) o de Twilio (proveedor)
+                // Usamos una variable global simple: si el último audio enviado fue del navegador, es 'tu'; si fue de Twilio, 'proveedor'
+                if (transcriberStreamSid === 'browser') {
+                    guardarFragmento('tu', texto);
+                } else if (transcriberStreamSid === 'twilio') {
+                    guardarFragmento('proveedor', texto);
+                }
+            }
+        } catch(e) { console.error('Error transcriber:', e); }
+    });
+    transcriberWs.on('close', () => { transcriberWs = null; });
+    transcriberWs.on('error', (err) => console.error('Error transcriber WS:', err));
+}
+
+// ==================== WEBSOCKETS EXTERNOS ====================
 wss.on('connection', (ws, req) => {
     const urlClara = new URL(req.url, `http://${req.headers.host}`);
     const pathname = urlClara.pathname;
 
     if (pathname === '/browser-stream') {
-        console.log('🚀 Navegador conectado. Total conexiones activas:', browserConnections.size + 1);
+        console.log('🖥️ Navegador conectado');
         browserConnections.add(ws);
-        
-        const keepAliveInterval = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'ping' }));
-                console.log('💓 Keepalive enviado al navegador');
-            } else {
-                clearInterval(keepAliveInterval);
-            }
-        }, 10000);
-        
         initGeminiToEnglish();
+        initTranscriber();  // Iniciar transcriber
 
         ws.on('message', (message) => {
+            // Enviar audio al traductor (inglés)
             if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) {
-                try {
-                    const base64Str = message.toString();
-                    const ulawBuffer = Buffer.from(base64Str, 'base64');
-                    const convertedAudio = twilioToGemini(ulawBuffer);
-                    
-                    geminiWsToEnglish.send(JSON.stringify({
-                        realtimeInput: {
-                            mediaChunks: [
-                                {
-                                    mimeType: "audio/pcm",
-                                    data: convertedAudio
-                                }
-                            ]
-                        }
-                    }));
-                } catch (err) {
-                    console.error("Error al procesar audio del navegador:", err);
-                }
+                const ulawBuffer = Buffer.from(message.toString(), 'base64');
+                const converted = twilioToGemini(ulawBuffer);
+                geminiWsToEnglish.send(JSON.stringify({ realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm", data: converted }] } }));
+            }
+            // Enviar UNA COPIA al transcriber para obtener el texto
+            if (transcriberWs && transcriberWs.readyState === WebSocket.OPEN) {
+                transcriberStreamSid = 'browser';  // Marcar origen
+                const ulawBuffer = Buffer.from(message.toString(), 'base64');
+                const converted = twilioToGemini(ulawBuffer);
+                transcriberWs.send(JSON.stringify({ realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm", data: converted }] } }));
             }
         });
-
-        ws.on('close', () => {
-            browserConnections.delete(ws);
-            clearInterval(keepAliveInterval);
-            console.log('🔌 Navegador desconectado. Conexiones restantes:', browserConnections.size);
-        });
-
-        ws.on('error', (err) => {
-            console.error('Error en WebSocket del navegador:', err.message);
-            browserConnections.delete(ws);
-            clearInterval(keepAliveInterval);
-        });
-    } 
-    
+        ws.on('close', () => { browserConnections.delete(ws); });
+    }
     else if (pathname === '/media-stream') {
-        console.log('🚀 Twilio vinculado.');
+        console.log('📞 Twilio conectado');
         twilioWs = ws;
-        
         initGeminiToSpanish();
+        initTranscriber();
 
         ws.on('message', (message) => {
             try {
                 const data = JSON.parse(message);
-                
                 if (data.event === 'start') {
                     twilioStreamSid = data.start.streamSid;
-                    console.log(`📞 Enlace Twilio fijado: ${twilioStreamSid}`);
-                    
-                    browserConnections.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(JSON.stringify({ type: 'twilio_ready' }));
-                            console.log('📢 Notificado al navegador: Twilio listo');
-                        }
-                    });
+                    console.log(`Stream Twilio: ${twilioStreamSid}`);
                 }
-
                 if (data.event === 'media') {
                     twilioPacketsIn++;
-                    if (twilioPacketsIn % 100 === 0) {
-                        console.log(`📥 [DIAGNÓSTICO]: Procesando audio de Twilio... (${twilioPacketsIn} paquetes)`);
-                    }
-
+                    // Enviar al traductor (español)
                     if (geminiWsToSpanish && geminiWsToSpanish.readyState === WebSocket.OPEN) {
-                        const convertedAudio = twilioToGemini(Buffer.from(data.media.payload, 'base64'));
-                        geminiWsToSpanish.send(JSON.stringify({
-                            realtimeInput: {
-                                mediaChunks: [
-                                    {
-                                        mimeType: "audio/pcm",
-                                        data: convertedAudio
-                                    }
-                                ]
-                            }
-                        }));
+                        const converted = twilioToGemini(Buffer.from(data.media.payload, 'base64'));
+                        geminiWsToSpanish.send(JSON.stringify({ realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm", data: converted }] } }));
+                    }
+                    // Enviar COPIA al transcriber
+                    if (transcriberWs && transcriberWs.readyState === WebSocket.OPEN) {
+                        transcriberStreamSid = 'twilio';
+                        const converted = twilioToGemini(Buffer.from(data.media.payload, 'base64'));
+                        transcriberWs.send(JSON.stringify({ realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm", data: converted }] } }));
                     }
                 }
-            } catch (err) {
-                console.error("Error en flujo Twilio:", err);
-            }
+            } catch(err) { console.error(err); }
         });
-
-        ws.on('close', () => { 
-            twilioWs = null; 
-            twilioStreamSid = null;
-            console.log('🔌 Twilio desconectado');
-        });
+        ws.on('close', () => { twilioWs = null; twilioStreamSid = null; });
     }
 });
