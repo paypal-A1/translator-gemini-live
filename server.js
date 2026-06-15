@@ -346,12 +346,14 @@ function initGeminiToEnglish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["AUDIO"],
-                    outputAudioTranscription: {},
-                    translationConfig: {
-                        targetLanguageCode: "en",
-                        echoTargetLanguage: true
+                    responseModalities: ["TEXT", "AUDIO"],
+                    outputAudioTranscription: {},  // <--- ÚNICO CAMBIO AGREGADO
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
+                },
+                systemInstruction: {
+                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from Spanish into fluent English. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
                 }
             }
         };
@@ -362,7 +364,7 @@ function initGeminiToEnglish() {
         try {
             const response = JSON.parse(message);
             
-            // Capturar texto de outputTranscription
+            // <--- NUEVA CAPTURA DE TEXTO (no afecta el audio)
             if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
                 procesarTextoIngles(response.serverContent.outputTranscription.text);
             }
@@ -371,6 +373,10 @@ function initGeminiToEnglish() {
                 if (response.serverContent.modelTurn) {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
+                        if (part.text) {
+                            procesarTextoIngles(part.text);
+                        }
+                        
                         // AUDIO LOGIC (TOTALMENTE INTACTA)
                         if (part.inlineData && part.inlineData.data) {
                             if (twilioWs && twilioWs.readyState === WebSocket.OPEN && twilioStreamSid) {
@@ -425,12 +431,14 @@ function initGeminiToSpanish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["AUDIO"],
-                    outputAudioTranscription: {},
-                    translationConfig: {
-                        targetLanguageCode: "es",
-                        echoTargetLanguage: true
+                    responseModalities: ["TEXT", "AUDIO"],
+                    outputAudioTranscription: {},  // <--- ÚNICO CAMBIO AGREGADO
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
+                },
+                systemInstruction: {
+                    parts: [{ text: "You are a real-time bidirectional translator. Translate everything the user says from English into fluent Spanish. Provide both the literal text translation and the spoken audio translation. Do not add any extra explanations or text commentary outside of the literal translation." }]
                 }
             }
         };
@@ -441,7 +449,7 @@ function initGeminiToSpanish() {
         try {
             const response = JSON.parse(message);
             
-            // Capturar texto de outputTranscription
+            // <--- NUEVA CAPTURA DE TEXTO (no afecta el audio)
             if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
                 procesarTextoEspanol(response.serverContent.outputTranscription.text);
             }
@@ -450,6 +458,10 @@ function initGeminiToSpanish() {
                 if (response.serverContent.modelTurn) {
                     const parts = response.serverContent.modelTurn.parts;
                     for (const part of parts) {
+                        if (part.text) {
+                            procesarTextoEspanol(part.text);
+                        }
+                        
                         // AUDIO LOGIC (TOTALMENTE INTACTA)
                         if (part.inlineData && part.inlineData.data) {
                             const convertedAudio = geminiToTwilio(part.inlineData.data);
