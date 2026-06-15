@@ -346,7 +346,7 @@ function initGeminiToEnglish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["TEXT", "AUDIO"],
+                    responseModalities: ["AUDIO"],
                     outputAudioTranscription: {},  // <--- ÚNICO CAMBIO AGREGADO
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
@@ -431,7 +431,7 @@ function initGeminiToSpanish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["TEXT", "AUDIO"],
+                    responseModalities: ["AUDIO"],
                     outputAudioTranscription: {},  // <--- ÚNICO CAMBIO AGREGADO
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
