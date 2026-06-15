@@ -346,8 +346,12 @@ function initGeminiToEnglish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["AUDIO"],  // <--- CAMBIO: solo AUDIO
-                    outputAudioTranscription: {}    // <--- CAMBIO: agregado
+                    responseModalities: ["AUDIO"],
+                    outputAudioTranscription: {},
+                    translationConfig: {
+                        targetLanguageCode: "en",
+                        echoTargetLanguage: true
+                    }
                 }
             }
         };
@@ -358,7 +362,7 @@ function initGeminiToEnglish() {
         try {
             const response = JSON.parse(message);
             
-            // <--- CAMBIO: capturar texto de outputTranscription
+            // Capturar texto de outputTranscription
             if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
                 procesarTextoIngles(response.serverContent.outputTranscription.text);
             }
@@ -421,8 +425,12 @@ function initGeminiToSpanish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["AUDIO"],  // <--- CAMBIO: solo AUDIO
-                    outputAudioTranscription: {}    // <--- CAMBIO: agregado
+                    responseModalities: ["AUDIO"],
+                    outputAudioTranscription: {},
+                    translationConfig: {
+                        targetLanguageCode: "es",
+                        echoTargetLanguage: true
+                    }
                 }
             }
         };
@@ -433,7 +441,7 @@ function initGeminiToSpanish() {
         try {
             const response = JSON.parse(message);
             
-            // <--- CAMBIO: capturar texto de outputTranscription
+            // Capturar texto de outputTranscription
             if (response.serverContent && response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
                 procesarTextoEspanol(response.serverContent.outputTranscription.text);
             }
