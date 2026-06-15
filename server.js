@@ -512,8 +512,9 @@ function initGeminiToEnglish() {
     });
 
     geminiWsToEnglish.on('close', () => { 
-        geminiWsToEnglish = null; 
-        console.log('🔌 Enlace cerrado con Gemini [Canal Inglés].');
+        
+        console.log(`🔌 Enlace cerrado con Gemini [Canal Inglés]. Código: ${code}, Razón: ${reason.toString()}`);
+        geminiWsToEnglish = null;
     });
     geminiWsToEnglish.on('error', (err) => console.error('Error Canal Inglés:', err));
 }
@@ -620,8 +621,9 @@ function initGeminiToSpanish() {
     });
 
     geminiWsToSpanish.on('close', () => { 
-        geminiWsToSpanish = null; 
-        console.log('🔌 Enlace cerrado con Gemini [Canal Español].');
+        console.log(`🔌 Enlace cerrado con Gemini [Canal Español]. Código: ${code}, Razón: ${reason.toString()}`);
+        geminiWsToSpanish = null;
+       
     });
     geminiWsToSpanish.on('error', (err) => console.error('Error Canal Español:', err));
 }
