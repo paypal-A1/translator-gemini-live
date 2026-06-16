@@ -522,14 +522,14 @@ function pcmToWav(pcmBuffer, sampleRate = 16000) {
     return buffer;
 }
 
-// 🌐 Petición oficial HTTP REST al modelo Gemini Standard (Flash) - CORREGIDA
+// 🌐 Petición oficial HTTP REST al modelo Gemini Standard (Flash) - ACTUALIZADA
 async function llamarGeminiFlashTranscriptor(audioBuffer, idiomaAudio) {
     try {
         const wavBuffer = pcmToWav(audioBuffer, 16000);
         const base64Audio = wavBuffer.toString('base64');
         
-        // CORRECCIÓN: Se cambió 'v1beta' por 'v1' para acceder al endpoint estable del modelo
-        const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+        // CORRECCIÓN: Se reemplazó el modelo obsoleto 1.5 por 'gemini-2.0-flash'
+        const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
         
         const response = await fetch(url, {
             method: 'POST',
@@ -556,7 +556,6 @@ async function llamarGeminiFlashTranscriptor(audioBuffer, idiomaAudio) {
         return "[Error en el servicio de transcripción]";
     }
 }
-
 // ⚙️ Orquestador asíncrono secundario (se dispara al colgar)
 async function procesarTranscripcionConGemini() {
     console.log("⏳ [Transcriptor] Procesando audio de la conversación de forma asíncrona...");
