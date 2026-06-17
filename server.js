@@ -16,7 +16,7 @@ const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TO
 let activeCallSid = null;
 let callStartTime = null;
 
-// Conversión de audio
+// Conversión de audio (igual que siempre)
 const ulawToPcmTable = new Int16Array(256);
 const BIAS = 0x84;
 function initAudioTables() {
@@ -58,7 +58,6 @@ function twilioToGemini(ulawBuffer) {
 
 function geminiToTwilio(pcmBase64) {
     const inBuffer = Buffer.from(pcmBase64, 'base64');
-    // El audio de Gemini viene a 24kHz, lo reducimos a 8kHz tomando una muestra cada 3
     const outBuffer = Buffer.alloc(Math.floor(inBuffer.length / 6));
     let outIdx = 0;
     for (let i = 0; i < inBuffer.length; i += 6) {
@@ -81,7 +80,7 @@ app.post('/twiml', (req, res) => {
     `);
 });
 
-// Gestión de conversación
+// ==================== GESTIÓN DE CONVERSACIÓN ====================
 let conversacionTemporal = [];
 let textoInglesAcumulado = '';
 let textoEspanolAcumulado = '';
@@ -229,17 +228,11 @@ function initGeminiToEnglish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["AUDIO"],
-                    // 👇 Agregamos configuración de transcripción con idioma
-                    inputAudioTranscription: {
-                        languageCode: "es"   // Idioma de entrada (español)
-                    },
-                    outputAudioTranscription: {
-                        languageCode: "en"   // Idioma de salida (inglés)
-                    },
+                    responseModalities: ["TEXT", "AUDIO"],   // 👈 Pide texto y audio
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
+                    // NO incluir inputAudioTranscription, outputAudioTranscription, translationConfig, systemInstruction
                 }
             }
         };
@@ -255,41 +248,34 @@ function initGeminiToEnglish() {
                 geminiWsToEnglish._logged = true;
             }
 
-            if (response.serverContent) {
-                // 📝 Transcripción de salida (traducción al inglés)
-                if (response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
-                    const texto = response.serverContent.outputTranscription.text;
-                    console.log(`🇺🇸 [SALIDA] Traducción al Inglés: "${texto}"`);
-                    textoInglesAcumulado += texto + ' ';
-                }
-
-                // 📝 Transcripción de entrada (lo que dijo el usuario en español) - opcional
-                if (response.serverContent.inputTranscription && response.serverContent.inputTranscription.text) {
-                    console.log(`🎤 [ENTRADA] Usuario dijo (Español): "${response.serverContent.inputTranscription.text}"`);
-                }
-
-                // 🔊 Audio
-                if (response.serverContent.modelTurn) {
-                    const parts = response.serverContent.modelTurn.parts;
-                    for (const part of parts) {
-                        if (part.inlineData && part.inlineData.data) {
-                            console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Inglés]');
-                            // Verificar si Twilio está conectado antes de enviar
-                            if (twilioWs && twilioWs.readyState === WebSocket.OPEN && twilioStreamSid) {
-                                const convertedAudio = geminiToTwilio(part.inlineData.data);
-                                twilioWs.send(JSON.stringify({
-                                    event: "media",
-                                    streamSid: twilioStreamSid,
-                                    media: { payload: convertedAudio }
-                                }));
-                                console.log('📤 [AUDIO] Enviado a Twilio');
-                            } else {
-                                console.log('⚠️ Twilio no disponible para enviar audio');
-                            }
+            if (response.serverContent && response.serverContent.modelTurn) {
+                const parts = response.serverContent.modelTurn.parts;
+                for (const part of parts) {
+                    // 📝 Texto de la traducción (viene en part.text)
+                    if (part.text) {
+                        console.log(`🇺🇸 [SALIDA] Traducción al Inglés: "${part.text}"`);
+                        textoInglesAcumulado += part.text + ' ';
+                        // Guardamos en tiempo real si quieres, pero mejor al final
+                        // guardarTexto('tu', part.text);
+                    }
+                    // 🔊 Audio
+                    if (part.inlineData && part.inlineData.data) {
+                        console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Inglés]');
+                        if (twilioWs && twilioWs.readyState === WebSocket.OPEN && twilioStreamSid) {
+                            const convertedAudio = geminiToTwilio(part.inlineData.data);
+                            twilioWs.send(JSON.stringify({
+                                event: "media",
+                                streamSid: twilioStreamSid,
+                                media: { payload: convertedAudio }
+                            }));
+                            console.log('📤 [AUDIO] Enviado a Twilio');
+                        } else {
+                            console.log('⚠️ Twilio no disponible para enviar audio');
                         }
                     }
                 }
             }
+            // No dependemos de turnComplete
         } catch (e) {
             console.error('❌ Error en mensaje Canal Inglés:', e);
         }
@@ -318,13 +304,7 @@ function initGeminiToSpanish() {
             setup: {
                 model: "models/gemini-3.5-live-translate-preview",
                 generationConfig: {
-                    responseModalities: ["AUDIO"],
-                    inputAudioTranscription: {
-                        languageCode: "en"   // Entrada en inglés
-                    },
-                    outputAudioTranscription: {
-                        languageCode: "es"   // Salida en español
-                    },
+                    responseModalities: ["TEXT", "AUDIO"],
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
                     }
@@ -343,29 +323,18 @@ function initGeminiToSpanish() {
                 geminiWsToSpanish._logged = true;
             }
 
-            if (response.serverContent) {
-                // 📝 Transcripción de salida (traducción al español)
-                if (response.serverContent.outputTranscription && response.serverContent.outputTranscription.text) {
-                    const texto = response.serverContent.outputTranscription.text;
-                    console.log(`🇪🇸 [SALIDA] Traducción al Español: "${texto}"`);
-                    textoEspanolAcumulado += texto + ' ';
-                }
-
-                // 📝 Transcripción de entrada (opcional)
-                if (response.serverContent.inputTranscription && response.serverContent.inputTranscription.text) {
-                    console.log(`🎤 [ENTRADA] Usuario dijo (Inglés): "${response.serverContent.inputTranscription.text}"`);
-                }
-
-                // 🔊 Audio
-                if (response.serverContent.modelTurn) {
-                    const parts = response.serverContent.modelTurn.parts;
-                    for (const part of parts) {
-                        if (part.inlineData && part.inlineData.data) {
-                            console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Español]');
-                            const convertedAudio = geminiToTwilio(part.inlineData.data);
-                            broadcastToBrowsers(convertedAudio);
-                            console.log('📤 [AUDIO] Enviado a navegadores');
-                        }
+            if (response.serverContent && response.serverContent.modelTurn) {
+                const parts = response.serverContent.modelTurn.parts;
+                for (const part of parts) {
+                    if (part.text) {
+                        console.log(`🇪🇸 [SALIDA] Traducción al Español: "${part.text}"`);
+                        textoEspanolAcumulado += part.text + ' ';
+                    }
+                    if (part.inlineData && part.inlineData.data) {
+                        console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Español]');
+                        const convertedAudio = geminiToTwilio(part.inlineData.data);
+                        broadcastToBrowsers(convertedAudio);
+                        console.log('📤 [AUDIO] Enviado a navegadores');
                     }
                 }
             }
@@ -464,7 +433,6 @@ wss.on('connection', (ws, req) => {
             twilioWs = null;
             twilioStreamSid = null;
             console.log('🔌 Twilio desconectado');
-            // Si Twilio se desconecta, podemos intentar reconectar? No es sencillo.
         });
     }
 });
