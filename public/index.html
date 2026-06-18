@@ -1,352 +1,472 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Consola Traductora de Llamadas</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; background: #f4f7f6; padding: 20px; }
-        .phone-container { max-width: 350px; margin: 0 auto; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .display { width: 100%; height: 50px; font-size: 24px; text-align: center; margin-bottom: 20px; border-radius: 10px; border: 1px solid #ccc; outline: none; box-sizing: border-box; }
-        .keyboard { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-        button { padding: 18px; font-size: 20px; border-radius: 10px; border: none; cursor: pointer; background: #e0e0e0; transition: background 0.1s; }
-        button:active { background: #d0d0d0; }
-        button.call { background: #2ecc71; color: white; grid-column: span 3; margin-top: 5px; }
-        button.hangup { background: #e74c3c; color: white; grid-column: span 3; margin-top: 5px; display: none; }
-        .status { margin-top: 15px; font-size: 14px; font-weight: bold; }
-        .history-section { margin-top: 25px; text-align: left; background: #f9f9f9; padding: 12px; border-radius: 10px; }
-        .history-title { font-size: 13px; font-weight: bold; color: #7f8c8d; margin-bottom: 8px; text-transform: uppercase; }
-        .history-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; background: white; margin-bottom: 5px; border-radius: 6px; border: 1px solid #edeec4; cursor: pointer; font-size: 14px; }
-        .history-item:hover { background: #f1f2f6; }
-        .timer {
-            font-size: 28px;
-            font-weight: bold;
-            text-align: center;
-            margin: 10px 0;
-            padding: 8px;
-            background: #2ecc71;
-            color: white;
-            border-radius: 30px;
-            display: none;
-            font-family: monospace;
-            letter-spacing: 2px;
-        }
-    </style>
-</head>
-<body>
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
+const path = require('path');
+const twilio = require('twilio');
+const { GoogleGenerativeAI } = require('@google/generative-ai'); // 👈 NUEVO
 
-<div class="phone-container">
-    <h2>Traductor Global</h2>
-    <input type="text" id="phoneNumber" class="display" placeholder="+1234567890" />
-    
-    <div class="keyboard">
-        <button onclick="press('1')">1</button><button onclick="press('2')">2</button><button onclick="press('3')">3</button>
-        <button onclick="press('4')">4</button><button onclick="press('5')">5</button><button onclick="press('6')">6</button>
-        <button onclick="press('7')">7</button><button onclick="press('8')">8</button><button onclick="press('9')">9</button>
-        <button onclick="press('+')">+</button><button onclick="press('0')">0</button><button onclick="backspace()">⌫</button>
-        
-        <button id="callBtn" class="call" onclick="startCall()">📞 Iniciar Llamada</button>
-        <button id="hangupBtn" class="hangup" onclick="endCall()">🛑 Finalizar Llamada</button>
-    </div>
+const app = express();
+app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-    <div id="statusMessage" class="status">Conectando canales...</div>
-    <div id="callTimer" class="timer">00:00</div>
+const PORT = process.env.PORT || 10000;
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-    <div class="history-section">
-        <div class="history-title">🕒 Recientes (Toca para cargar)</div>
-        <div id="historyList"></div>
-    </div>
-</div>
+// ==================== CLIENTE GEMINI PARA TRANSCRIPCIÓN ====================
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const transcriptionModel = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
 
-<script>
-    let ws;
-    let audioCtx;
-    let processor;
-    let source;
-    let globalStream;
-    let ultimaDuracion = null;
-    let callStartTimer = null;
-    let timerInterval = null;
-    let micActivationPending = false;
+let activeCallSid = null;
+let callStartTime = null;
 
-    function press(num) { document.getElementById('phoneNumber').value += num; }
-    
-    function backspace() {
-        let current = document.getElementById('phoneNumber').value;
-        document.getElementById('phoneNumber').value = current.slice(0, -1);
-    }
-
-    function loadHistory() {
-        const history = JSON.parse(localStorage.getItem('phoneHistory')) || [];
-        const container = document.getElementById('historyList');
-        container.innerHTML = '';
-        if(history.length === 0) {
-            container.innerHTML = '<span style="color:#aaa; font-size:12px;">No hay llamadas recientes</span>';
-            return;
-        }
-        history.forEach(item => {
-            const num = item.number;
-            const duration = item.duration ? item.duration : null;
-            const div = document.createElement('div');
-            div.className = 'history-item';
-            div.innerHTML = `<span>${num}</span><span style="color:#2ecc71; font-weight:bold;">${duration ? duration + 's' : '⚡'}</span>`;
-            div.onclick = () => { document.getElementById('phoneNumber').value = num; };
-            container.appendChild(div);
-        });
-    }
-
-    function saveHistory(num, duration) {
-        let history = JSON.parse(localStorage.getItem('phoneHistory')) || [];
-        history.unshift({ number: num, duration: duration, timestamp: Date.now() });
-        if (history.length > 50) history.pop();
-        localStorage.setItem('phoneHistory', JSON.stringify(history));
-        loadHistory();
-    }
-
-    function connectWebSocket() {
-        const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-        ws = new WebSocket(protocol + window.location.host + '/browser-stream');
-        
-        ws.onopen = () => {
-            console.log("✅ Navegador: WebSocket conectado");
-            document.getElementById('statusMessage').style.color = '#2ecc71';
-            document.getElementById('statusMessage').innerText = "✅ Sistema Listo y Conectado";
-        };
-        
-        ws.onmessage = async (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'audio' && data.payload) {
-                    console.log("📱 Navegador: Recibido paquete de audio del servidor, longitud:", data.payload.length);
-                    playUlawBase64(data.payload);
-                } else if (data.type === 'call_duration' && data.duration) {
-                    ultimaDuracion = data.duration;
-                    console.log("📊 Duración recibida del servidor:", ultimaDuracion);
-                } else if (data.type === 'twilio_ready') {
-                    console.log("📞 Twilio listo, activando micrófono...");
-                    document.getElementById('statusMessage').innerText = "Llamada en curso...";
-                    await startMicrophone();
-                    // Iniciar contador de tiempo
-                    callStartTimer = Date.now();
-                    const timerDiv = document.getElementById('callTimer');
-                    timerDiv.style.display = 'block';
-                    if (timerInterval) clearInterval(timerInterval);
-                    timerInterval = setInterval(() => {
-                        const elapsed = Math.floor((Date.now() - callStartTimer) / 1000);
-                        const mins = Math.floor(elapsed / 60);
-                        const secs = elapsed % 60;
-                        timerDiv.textContent = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-                    }, 1000);
-                } else {
-                    console.log("📩 Navegador: Mensaje recibido tipo:", data.type);
-                }
-            } catch(e) { 
-                console.error("❌ Navegador: Error al parsear mensaje:", e);
-            }
-        };
-
-        ws.onclose = () => {
-            console.log("⚠️ Navegador: WebSocket cerrado");
-            document.getElementById('statusMessage').style.color = '#e74c3c';
-            document.getElementById('statusMessage').innerText = "⚠️ Sistema no disponible";
-            setTimeout(connectWebSocket, 3000);
-        };
-        
-        ws.onerror = (err) => {
-            console.error("❌ Navegador: Error en WebSocket:", err);
-        };
-    }
-
-    async function startMicrophone() {
-        try {
-            globalStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-            console.log("✅ Navegador: Micrófono activado");
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
-            }
-            source = audioCtx.createMediaStreamSource(globalStream);
-            processor = audioCtx.createScriptProcessor(2048, 1, 1);
-
-            source.connect(processor);
-            processor.connect(audioCtx.destination);
-
-            processor.onaudioprocess = (e) => {
-                const inputData = e.inputBuffer.getChannelData(0);
-                const ulawBytes = new Uint8Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    let sample = Math.min(1, Math.max(-1, inputData[i])) * 32767;
-                    ulawBytes[i] = linear2ulaw(sample);
-                }
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    const base64Audio = btoa(String.fromCharCode.apply(null, ulawBytes));
-                    ws.send(base64Audio);
-                }
-            };
-        } catch (err) {
-            alert("Por favor permite el acceso al micrófono.");
-        }
-    }
-
-    function stopMicrophone() {
-        if (globalStream) globalStream.getTracks().forEach(track => track.stop());
-        if (processor) processor.disconnect();
-        if (source) source.disconnect();
-        console.log("🔴 Navegador: Micrófono detenido");
-    }
-
-    function linear2ulaw(sample) {
-        let sign = (sample >> 8) & 0x80;
-        if (sample < 0) { sample = -sample; sign = 0x80; }
-        if (sample > 32635) sample = 32635;
-        sample += 0x84;
-        let exponent = 7;
-        for (let bit = 0x4000; (sample & bit) === 0 && exponent > 0; bit >>= 1) { exponent--; }
-        let mantissa = (sample >> (exponent + 3)) & 0x0F;
-        return ~(sign | (exponent << 4) | mantissa) & 0xFF;
-    }
-
-    function ulaw2linear(ulaw) {
-        ulaw = ~ulaw & 0xFF;
-        let sign = (ulaw & 0x80);
+// Conversión de audio (igual que siempre)
+const ulawToPcmTable = new Int16Array(256);
+const BIAS = 0x84;
+function initAudioTables() {
+    for (let i = 0; i < 256; i++) {
+        let ulaw = ~i;
+        let sign = ulaw & 0x80;
         let exponent = (ulaw >> 4) & 0x07;
         let mantissa = ulaw & 0x0F;
-        let sample = (mantissa << 3) + 132;
-        sample <<= exponent;
-        sample -= 132;
-        return sign ? -sample : sample;
+        let sample = ((mantissa << 3) + BIAS) << exponent;
+        sample -= BIAS;
+        ulawToPcmTable[i] = sign ? -sample : sample;
     }
+}
+initAudioTables();
 
-    function playUlawBase64(base64Data) {
-        console.log("🔊 Navegador: Iniciando reproducción de audio...");
-        
-        if (!audioCtx) {
-            console.log("📁 Navegador: Creando nuevo AudioContext");
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function encodeMuLawSample(pcm) {
+    let sign = (pcm & 0x8000) >> 8;
+    if (pcm < 0) { pcm = -pcm; pcm -= 1; }
+    if (pcm > 32635) pcm = 32635;
+    pcm += BIAS;
+    let exponent = 7;
+    for (let mask = 0x4000; (pcm & mask) == 0 && exponent > 0; mask >>= 1) { exponent--; }
+    let mantissa = (pcm >> (exponent + 3)) & 0x0F;
+    return ~(sign | (exponent << 4) | mantissa) & 0xFF;
+}
+
+// Convierte µ-law (8kHz) a PCM (16kHz) duplicando muestras
+function twilioToGemini(ulawBuffer) {
+    const outBuffer = Buffer.alloc(ulawBuffer.length * 4);
+    let outIdx = 0;
+    for (let i = 0; i < ulawBuffer.length; i++) {
+        const pcmSample = ulawToPcmTable[ulawBuffer[i]];
+        outBuffer.writeInt16LE(pcmSample, outIdx);
+        outIdx += 2;
+        outBuffer.writeInt16LE(pcmSample, outIdx);
+        outIdx += 2;
+    }
+    return outBuffer;
+}
+
+// Convierte PCM (24kHz) a µ-law (8kHz) para Twilio
+function geminiToTwilio(pcmBase64) {
+    const inBuffer = Buffer.from(pcmBase64, 'base64');
+    const outBuffer = Buffer.alloc(Math.floor(inBuffer.length / 6));
+    let outIdx = 0;
+    for (let i = 0; i < inBuffer.length; i += 6) {
+        if (i + 1 < inBuffer.length) {
+            const pcmSample = inBuffer.readInt16LE(i);
+            outBuffer[outIdx++] = encodeMuLawSample(pcmSample);
         }
+    }
+    return outBuffer;
+}
+
+app.post('/twiml', (req, res) => {
+    res.type('text/xml');
+    res.send(`
+        <Response>
+            <Connect>
+                <Stream url="wss://${req.headers.host}/media-stream" />
+            </Connect>
+        </Response>
+    `);
+});
+
+// ==================== GESTIÓN DE CONVERSACIÓN ====================
+let conversacionTemporal = [];
+let audioBufferPCM = Buffer.alloc(0); // 👈 NUEVO: buffer para acumular audio PCM
+let textoTranscrito = '';             // 👈 NUEVO: acumula transcripción final
+
+function guardarTexto(tipo, texto) {
+    if (!texto || texto.trim().length === 0) return;
+    console.log(`📝 [GUARDAR] ${tipo}: "${texto.trim()}"`);
+    conversacionTemporal.push({
+        timestamp: new Date().toISOString(),
+        tipo: tipo,
+        texto: texto.trim()
+    });
+}
+
+function finalizarConversacion() {
+    // Si hay transcripción pendiente, guardarla
+    if (textoTranscrito.trim()) {
+        guardarTexto('transcripcion', textoTranscrito.trim());
+        textoTranscrito = '';
+    }
+    // Limpiar buffer de audio
+    audioBufferPCM = Buffer.alloc(0);
+    console.log(`📊 [CONVERSACIÓN] Finalizada. Total fragmentos: ${conversacionTemporal.length}`);
+}
+
+app.get('/descargar-conversacion', (req, res) => {
+    finalizarConversacion();
+    if (conversacionTemporal.length === 0) {
+        res.setHeader('Content-Type', 'text/plain');
+        res.setHeader('Content-Disposition', 'attachment; filename="conversacion_vacia.txt"');
+        return res.send("No hay conversación registrada aún.");
+    }
+    let contenido = '';
+    for (const linea of conversacionTemporal) {
+        const hora = new Date(linea.timestamp).toLocaleTimeString([], { hour: '2-digit', minute:'2-digit', second:'2-digit' });
+        contenido += `[${hora}] ${linea.tipo}: ${linea.texto}\n`;
+    }
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Content-Disposition', 'attachment; filename="conversacion.txt"');
+    res.send(contenido);
+    conversacionTemporal = [];
+    audioBufferPCM = Buffer.alloc(0);
+    textoTranscrito = '';
+});
+
+app.post('/make-call', async (req, res) => {
+    const { toPhoneNumber } = req.body;
+    try {
+        const call = await client.calls.create({
+            url: `https://${req.headers.host}/twiml`,
+            to: toPhoneNumber,
+            from: process.env.TWILIO_NUMBER || '+18633445321'
+        });
+        activeCallSid = call.sid;
+        callStartTime = Date.now();
+        conversacionTemporal = [];
+        audioBufferPCM = Buffer.alloc(0);
+        textoTranscrito = '';
+        console.log('📞 [LLAMADA] Iniciada con SID:', call.sid);
         
-        if (audioCtx.state === 'suspended') {
-            console.log("⚠️ Navegador: AudioContext suspendido, reanudando...");
-            audioCtx.resume().then(() => {
-                console.log("✅ Navegador: AudioContext reanudado correctamente");
-            }).catch(e => {
-                console.error("❌ Navegador: Error al reanudar AudioContext:", e);
+        // Conectar Gemini Live al iniciar la llamada (traducción voz a voz)
+        initGeminiToEnglish();
+        initGeminiToSpanish();
+        
+        res.status(200).json({ success: true, callSid: call.sid });
+    } catch (error) {
+        console.error('❌ Error al realizar la llamada:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/hangup', async (req, res) => {
+    try {
+        if (activeCallSid) {
+            await client.calls(activeCallSid).update({ status: 'completed' });
+            
+            // 🔥 NUEVO: Antes de finalizar, transcribir el audio acumulado
+            if (audioBufferPCM.length > 0) {
+                console.log(`🎤 [TRANSCRIPCIÓN] Iniciando transcripción de ${audioBufferPCM.length} bytes de audio...`);
+                await transcribirAudioPCM(audioBufferPCM);
+            } else {
+                console.log('⚠️ No hay audio acumulado para transcribir.');
+            }
+            
+            finalizarConversacion();
+            
+            if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) {
+                geminiWsToEnglish.close();
+                geminiWsToEnglish = null;
+            }
+            if (geminiWsToSpanish && geminiWsToSpanish.readyState === WebSocket.OPEN) {
+                geminiWsToSpanish.close();
+                geminiWsToSpanish = null;
+            }
+            const duracion = callStartTime ? ((Date.now() - callStartTime) / 1000).toFixed(1) : 'desconocida';
+            console.log(`📊 [LLAMADA] Finalizada. Duración: ${duracion}s`);
+            browserConnections.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ type: 'call_duration', duration: duracion }));
+                }
             });
+            activeCallSid = null;
+            callStartTime = null;
+            res.status(200).json({ success: true });
         } else {
-            console.log("✅ Navegador: AudioContext activo, estado:", audioCtx.state);
+            res.status(400).json({ success: false, error: "No hay llamada activa" });
         }
+    } catch (error) {
+        console.error('❌ Error al colgar:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ==================== FUNCIÓN DE TRANSCRIPCIÓN (NUEVA) ====================
+async function transcribirAudioPCM(pcmBuffer) {
+    try {
+        // Convertir el buffer PCM a base64
+        const audioBase64 = pcmBuffer.toString('base64');
         
-        try {
-            const binaryString = atob(base64Data);
-            const len = binaryString.length;
-            console.log(`📊 Navegador: Decodificando ${len} bytes de audio ulaw`);
-            
-            const float32Data = new Float32Array(len);
-            for (let i = 0; i < len; i++) {
-                float32Data[i] = ulaw2linear(binaryString.charCodeAt(i)) / 32768;
+        console.log(`📤 Enviando ${pcmBuffer.length} bytes de audio a Gemini 3.1 Flash-Lite...`);
+        
+        const result = await transcriptionModel.generateContent({
+            contents: [
+                { 
+                    role: 'user', 
+                    parts: [
+                        { text: 'Transcribe el siguiente audio al texto literal en español. Solo devuelve la transcripción, sin comentarios adicionales.' },
+                        { inlineData: { mimeType: 'audio/pcm', data: audioBase64 } }
+                    ]
+                }
+            ]
+        });
+        
+        const texto = result.response.text();
+        if (texto && texto.trim().length > 0) {
+            console.log(`📝 [TRANSCRIPCIÓN FINAL] "${texto}"`);
+            textoTranscrito = texto.trim();
+            guardarTexto('transcripcion', textoTranscrito);
+        } else {
+            console.log('⚠️ No se obtuvo transcripción (texto vacío).');
+        }
+    } catch (err) {
+        console.error('❌ Error al transcribir audio:', err.message);
+        if (err.message.includes('429')) {
+            console.log('⚠️ Límite de cuota alcanzado. Intenta más tarde.');
+        }
+    }
+}
+
+// ==================== WEBSOCKETS (igual que antes, con pequeña adición) ====================
+const server = app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+const wss = new WebSocket.Server({ server });
+
+let geminiWsToEnglish = null;
+let geminiWsToSpanish = null;
+let twilioWs = null;
+let twilioStreamSid = null;
+let twilioPacketsIn = 0;
+
+const browserConnections = new Set();
+
+function broadcastToBrowsers(audioData) {
+    const toRemove = [];
+    browserConnections.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'audio', payload: audioData }));
+        } else {
+            toRemove.push(ws);
+        }
+    });
+    toRemove.forEach(ws => browserConnections.delete(ws));
+}
+
+// ==================== CANAL 1: Navegador -> Gemini Live -> Twilio (Inglés) ====================
+function initGeminiToEnglish() {
+    if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) {
+        console.log('ℹ️ Gemini [Inglés] ya está conectado');
+        return;
+    }
+    console.log('🔌 Conectando a Gemini [Canal Español ➡️ Inglés]...');
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
+    geminiWsToEnglish = new WebSocket(url);
+
+    geminiWsToEnglish.on('open', () => {
+        console.log('✅ Gemini [Inglés] conectado.');
+        const setupMessage = {
+            setup: {
+                model: "models/gemini-3.5-live-translate-preview",
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
+                    }
+                }
             }
-            
-            const audioBuffer = audioCtx.createBuffer(1, len, 8000);
-            audioBuffer.getChannelData(0).set(float32Data);
-            
-            const bufferSource = audioCtx.createBufferSource();
-            bufferSource.buffer = audioBuffer;
-            bufferSource.connect(audioCtx.destination);
-            bufferSource.start();
-            
-            console.log("✅ Navegador: Audio enviado a los altavoces");
+        };
+        geminiWsToEnglish.send(JSON.stringify(setupMessage));
+        console.log('📤 [SETUP] Enviado a Gemini [Inglés]');
+    });
+
+    geminiWsToEnglish.on('message', (message) => {
+        try {
+            const response = JSON.parse(message);
+            if (response.serverContent && response.serverContent.modelTurn) {
+                const parts = response.serverContent.modelTurn.parts;
+                for (const part of parts) {
+                    if (part.inlineData && part.inlineData.data) {
+                        console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Inglés]');
+                        if (twilioWs && twilioWs.readyState === WebSocket.OPEN && twilioStreamSid) {
+                            const convertedAudio = geminiToTwilio(part.inlineData.data);
+                            twilioWs.send(JSON.stringify({
+                                event: "media",
+                                streamSid: twilioStreamSid,
+                                media: { payload: convertedAudio.toString('base64') }
+                            }));
+                            console.log('📤 [AUDIO] Enviado a Twilio');
+                        } else {
+                            console.log('⚠️ Twilio no disponible');
+                        }
+                    }
+                }
+            }
         } catch (e) {
-            console.error("❌ Navegador: Error reproduciendo audio:", e);
+            console.error('❌ Error en mensaje Canal Inglés:', e);
         }
-    }
+    });
 
-    async function startCall() {
-        const number = document.getElementById('phoneNumber').value;
-        if(!number) return alert("Escribe un número válido");
-        
-        document.getElementById('callBtn').style.display = 'none';
-        document.getElementById('hangupBtn').style.display = 'block';
-        document.getElementById('statusMessage').innerText = "Marcando...";
-        
-        saveHistory(number);
-        
-        // NO activar micrófono aquí - se activará cuando llegue 'twilio_ready'
-        
-        try {
-            const response = await fetch('/make-call', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ toPhoneNumber: number })
-            });
-            
-            const result = await response.json();
-            if(result.success) {
-                document.getElementById('statusMessage').innerText = "Esperando conexión...";
-            } else {
-                alert("Error de Twilio: " + result.error);
-                resetButtons();
-            }
-        } catch (error) {
-            alert("Error de red al enlazar llamada.");
-            resetButtons();
-        }
-    }
+    geminiWsToEnglish.on('close', (code, reason) => {
+        console.log(`🔌 Desconectado Gemini [Inglés] - Código: ${code}, Razón: ${reason || 'sin razón'}`);
+        geminiWsToEnglish = null;
+    });
+    geminiWsToEnglish.on('error', (err) => console.error('❌ Error Canal Inglés:', err));
+}
 
-    async function endCall() {
-        const number = document.getElementById('phoneNumber').value;
-        document.getElementById('statusMessage').innerText = "Cortando conexión...";
-        
-        if (timerInterval) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-        }
-        const timerDiv = document.getElementById('callTimer');
-        timerDiv.style.display = 'none';
-        timerDiv.textContent = '00:00';
-        callStartTimer = null;
-        
-        try {
-            await fetch('/hangup', { method: 'POST' });
-        } catch(e) { console.error(e); }
-        stopMicrophone();
-        resetButtons();
-        document.getElementById('statusMessage').style.color = '#2ecc71';
-        document.getElementById('statusMessage').innerText = "Llamada finalizada de forma segura.";
-        
-        setTimeout(() => {
-            if (ultimaDuracion) {
-                saveHistory(number, ultimaDuracion);
-                ultimaDuracion = null;
-            } else {
-                saveHistory(number, null);
+// ==================== CANAL 2: Twilio -> Gemini Live -> Navegador (Español) ====================
+function initGeminiToSpanish() {
+    if (geminiWsToSpanish && geminiWsToSpanish.readyState === WebSocket.OPEN) {
+        console.log('ℹ️ Gemini [Español] ya está conectado');
+        return;
+    }
+    console.log('🔌 Conectando a Gemini [Canal Inglés ➡️ Español]...');
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
+    geminiWsToSpanish = new WebSocket(url);
+
+    geminiWsToSpanish.on('open', () => {
+        console.log('✅ Gemini [Español] conectado.');
+        const setupMessage = {
+            setup: {
+                model: "models/gemini-3.5-live-translate-preview",
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
+                    }
+                }
             }
-        }, 500);
-        
-        setTimeout(async () => {
+        };
+        geminiWsToSpanish.send(JSON.stringify(setupMessage));
+        console.log('📤 [SETUP] Enviado a Gemini [Español]');
+    });
+
+    geminiWsToSpanish.on('message', (message) => {
+        try {
+            const response = JSON.parse(message);
+            if (response.serverContent && response.serverContent.modelTurn) {
+                const parts = response.serverContent.modelTurn.parts;
+                for (const part of parts) {
+                    if (part.inlineData && part.inlineData.data) {
+                        console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Español]');
+                        const convertedAudio = geminiToTwilio(part.inlineData.data);
+                        broadcastToBrowsers(convertedAudio.toString('base64'));
+                        console.log('📤 [AUDIO] Enviado a navegadores');
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('❌ Error en mensaje Canal Español:', e);
+        }
+    });
+
+    geminiWsToSpanish.on('close', (code, reason) => {
+        console.log(`🔌 Desconectado Gemini [Español] - Código: ${code}, Razón: ${reason || 'sin razón'}`);
+        geminiWsToSpanish = null;
+    });
+    geminiWsToSpanish.on('error', (err) => console.error('❌ Error Canal Español:', err));
+}
+
+// ==================== WebSockets del servidor ====================
+wss.on('connection', (ws, req) => {
+    const urlClara = new URL(req.url, `http://${req.headers.host}`);
+    const pathname = urlClara.pathname;
+
+    if (pathname === '/browser-stream') {
+        console.log('🖥️ Navegador conectado. Conexiones activas:', browserConnections.size + 1);
+        browserConnections.add(ws);
+        const keepAliveInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+            } else {
+                clearInterval(keepAliveInterval);
+            }
+        }, 10000);
+
+        ws.on('message', (message) => {
+            if (geminiWsToEnglish && geminiWsToEnglish.readyState === WebSocket.OPEN) {
+                try {
+                    const base64Str = message.toString();
+                    const ulawBuffer = Buffer.from(base64Str, 'base64');
+                    const pcmBuffer = twilioToGemini(ulawBuffer); // Devuelve Buffer PCM 16kHz
+                    
+                    // 1. Enviar a Gemini Live (audio a audio)
+                    geminiWsToEnglish.send(JSON.stringify({
+                        realtimeInput: {
+                            mediaChunks: [{ mimeType: "audio/pcm", data: pcmBuffer.toString('base64') }]
+                        }
+                    }));
+
+                    // 2. Acumular audio PCM para transcripción (NUEVO)
+                    audioBufferPCM = Buffer.concat([audioBufferPCM, pcmBuffer]);
+                    if (audioBufferPCM.length % (16000 * 2 * 10) === 0) { // Cada ~10 segundos
+                        console.log(`📊 Audio acumulado: ${(audioBufferPCM.length / (16000 * 2)).toFixed(1)} segundos`);
+                    }
+                } catch (err) {
+                    console.error('❌ Error al procesar audio del navegador:', err);
+                }
+            } else {
+                console.log('⚠️ Gemini [Inglés] no disponible');
+            }
+        });
+
+        ws.on('close', () => {
+            browserConnections.delete(ws);
+            clearInterval(keepAliveInterval);
+            console.log('🔌 Navegador desconectado. Conexiones restantes:', browserConnections.size);
+        });
+        ws.on('error', (err) => console.error('❌ Error en WebSocket del navegador:', err.message));
+    } 
+    else if (pathname === '/media-stream') {
+        console.log('📞 Twilio conectado.');
+        twilioWs = ws;
+
+        ws.on('message', (message) => {
             try {
-                const response = await fetch('/descargar-conversacion');
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `conversacion_${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.txt`;
-                a.click();
-                URL.revokeObjectURL(url);
-                console.log("✅ Conversación descargada automáticamente");
-            } catch(e) { 
-                console.error("Error al descargar conversación:", e); 
+                const data = JSON.parse(message);
+                if (data.event === 'start') {
+                    twilioStreamSid = data.start.streamSid;
+                    console.log(`📞 StreamSid de Twilio: ${twilioStreamSid}`);
+                    browserConnections.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify({ type: 'twilio_ready' }));
+                        }
+                    });
+                }
+                if (data.event === 'media') {
+                    twilioPacketsIn++;
+                    if (twilioPacketsIn % 100 === 0) {
+                        console.log(`📥 [DIAGNÓSTICO] Paquetes de Twilio procesados: ${twilioPacketsIn}`);
+                    }
+                    if (geminiWsToSpanish && geminiWsToSpanish.readyState === WebSocket.OPEN) {
+                        const ulawBuffer = Buffer.from(data.media.payload, 'base64');
+                        const pcmBuffer = twilioToGemini(ulawBuffer);
+                        geminiWsToSpanish.send(JSON.stringify({
+                            realtimeInput: {
+                                mediaChunks: [{ mimeType: "audio/pcm", data: pcmBuffer.toString('base64') }]
+                            }
+                        }));
+                    } else {
+                        console.log('⚠️ Gemini [Español] no disponible');
+                    }
+                }
+            } catch (err) {
+                console.error('❌ Error en flujo Twilio:', err);
             }
-        }, 500);
-    }
+        });
 
-    function resetButtons() {
-        document.getElementById('callBtn').style.display = 'block';
-        document.getElementById('hangupBtn').style.display = 'none';
+        ws.on('close', () => {
+            twilioWs = null;
+            twilioStreamSid = null;
+            console.log('🔌 Twilio desconectado');
+        });
     }
-
-    window.onload = () => {
-        connectWebSocket();
-        loadHistory();
-    };
-</script>
-</body>
-</html>
+});
