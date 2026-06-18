@@ -174,15 +174,11 @@ app.get('/descargar-conversacion', (req, res) => {
         const hora = new Date(linea.timestamp).toLocaleTimeString([], { hour: '2-digit', minute:'2-digit', second:'2-digit' });
        
         if (linea.tipo === 'tu') {
-            // YO: traducción al inglés (pero la etiquetamos como YO)
-            contenido += `[${hora}] YO: ${linea.texto}\n`;
+            contenido += `[${hora}] Tú (Inglés): ${linea.texto}\n`;
         } else if (linea.tipo === 'proveedor') {
-            // PROVEEDOR: traducción al español (y el original en inglés, si lo tuviéramos)
-            // Como no tenemos el original, solo ponemos la traducción
-            contenido += `[${hora}] PROVEEDOR: ${linea.texto}\n`;
+            contenido += `[${hora}] Proveedor (Español): ${linea.texto}\n`;
         } else if (linea.tipo === 'transcripcion') {
-            // Transcripción del navegador (tu voz en español)
-            contenido += `[${hora}] YO: ${linea.texto}\n`;
+            contenido += `[${hora}] Transcripción: ${linea.texto}\n`;
         }
     }
     
