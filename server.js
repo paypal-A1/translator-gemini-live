@@ -4,7 +4,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const twilio = require('twilio');
-const { GoogleGenerativeAI } = require('@google/generative-ai'); // 👈 NUEVO
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 app.use(express.static('public'));
@@ -21,9 +21,10 @@ const transcriptionModel = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-l
 let activeCallSid = null;
 let callStartTime = null;
 
-// Conversión de audio (igual que siempre)
+// ==================== CONVERSIÓN DE AUDIO ====================
 const ulawToPcmTable = new Int16Array(256);
 const BIAS = 0x84;
+
 function initAudioTables() {
     for (let i = 0; i < 256; i++) {
         let ulaw = ~i;
@@ -89,8 +90,10 @@ app.post('/twiml', (req, res) => {
 
 // ==================== GESTIÓN DE CONVERSACIÓN ====================
 let conversacionTemporal = [];
-let audioBufferPCM = Buffer.alloc(0); // 👈 NUEVO: buffer para acumular audio PCM
-let textoTranscrito = '';             // 👈 NUEVO: acumula transcripción final
+let audioBufferPCM = Buffer.alloc(0);       // Buffer para acumular audio PCM (16kHz)
+let textoTranscrito = '';                   // Acumula transcripciones finales
+let lastTranscriptionTime = Date.now();
+const SEGMENT_DURATION = 10;                // Segundos de audio por segmento
 
 function guardarTexto(tipo, texto) {
     if (!texto || texto.trim().length === 0) return;
@@ -146,6 +149,7 @@ app.post('/make-call', async (req, res) => {
         conversacionTemporal = [];
         audioBufferPCM = Buffer.alloc(0);
         textoTranscrito = '';
+        lastTranscriptionTime = Date.now();
         console.log('📞 [LLAMADA] Iniciada con SID:', call.sid);
         
         // Conectar Gemini Live al iniciar la llamada (traducción voz a voz)
@@ -164,12 +168,11 @@ app.post('/hangup', async (req, res) => {
         if (activeCallSid) {
             await client.calls(activeCallSid).update({ status: 'completed' });
             
-            // 🔥 NUEVO: Antes de finalizar, transcribir el audio acumulado
+            // 🔥 Transcribir el audio restante (si hay)
             if (audioBufferPCM.length > 0) {
-                console.log(`🎤 [TRANSCRIPCIÓN] Iniciando transcripción de ${audioBufferPCM.length} bytes de audio...`);
+                console.log(`🎤 [TRANSCRIPCIÓN] Transcribiendo segmento final de ${audioBufferPCM.length} bytes...`);
                 await transcribirAudioPCM(audioBufferPCM);
-            } else {
-                console.log('⚠️ No hay audio acumulado para transcribir.');
+                audioBufferPCM = Buffer.alloc(0);
             }
             
             finalizarConversacion();
@@ -201,10 +204,16 @@ app.post('/hangup', async (req, res) => {
     }
 });
 
-// ==================== FUNCIÓN DE TRANSCRIPCIÓN (NUEVA) ====================
+// ==================== FUNCIÓN DE TRANSCRIPCIÓN (MEJORADA) ====================
 async function transcribirAudioPCM(pcmBuffer) {
     try {
-        // Convertir el buffer PCM a base64
+        // Verificar tamaño mínimo (0.5 segundos de audio ≈ 16000 * 2 * 0.5 = 16000 bytes)
+        if (pcmBuffer.length < 16000) {
+            console.log(`⚠️ Segmento demasiado pequeño (${pcmBuffer.length} bytes), omitiendo transcripción.`);
+            return;
+        }
+
+        // Convertir a base64
         const audioBase64 = pcmBuffer.toString('base64');
         
         console.log(`📤 Enviando ${pcmBuffer.length} bytes de audio a Gemini 3.1 Flash-Lite...`);
@@ -214,7 +223,9 @@ async function transcribirAudioPCM(pcmBuffer) {
                 { 
                     role: 'user', 
                     parts: [
-                        { text: 'Transcribe el siguiente audio al texto literal en español. Solo devuelve la transcripción, sin comentarios adicionales.' },
+                        { 
+                            text: 'Transcribe el siguiente audio al texto literal en español. Solo devuelve la transcripción exacta, sin comentarios adicionales.' 
+                        },
                         { inlineData: { mimeType: 'audio/pcm', data: audioBase64 } }
                     ]
                 }
@@ -224,8 +235,9 @@ async function transcribirAudioPCM(pcmBuffer) {
         const texto = result.response.text();
         if (texto && texto.trim().length > 0) {
             console.log(`📝 [TRANSCRIPCIÓN FINAL] "${texto}"`);
-            textoTranscrito = texto.trim();
-            guardarTexto('transcripcion', textoTranscrito);
+            textoTranscrito += texto.trim() + ' ';
+            // Guardar en tiempo real
+            guardarTexto('transcripcion', texto.trim());
         } else {
             console.log('⚠️ No se obtuvo transcripción (texto vacío).');
         }
@@ -237,7 +249,7 @@ async function transcribirAudioPCM(pcmBuffer) {
     }
 }
 
-// ==================== WEBSOCKETS (igual que antes, con pequeña adición) ====================
+// ==================== WEBSOCKETS ====================
 const server = app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
 const wss = new WebSocket.Server({ server });
 
@@ -297,11 +309,16 @@ function initGeminiToEnglish() {
                     if (part.inlineData && part.inlineData.data) {
                         console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Inglés]');
                         if (twilioWs && twilioWs.readyState === WebSocket.OPEN && twilioStreamSid) {
-                            const convertedAudio = geminiToTwilio(part.inlineData.data);
+                            let audioBase64 = part.inlineData.data;
+                            // Si no hay audio, enviar silencio
+                            if (!audioBase64 || audioBase64.length === 0) {
+                                console.log('⚠️ Audio vacío, enviando silencio a Twilio');
+                                audioBase64 = Buffer.alloc(160).toString('base64'); // 10ms de silencio
+                            }
                             twilioWs.send(JSON.stringify({
                                 event: "media",
                                 streamSid: twilioStreamSid,
-                                media: { payload: convertedAudio.toString('base64') }
+                                media: { payload: audioBase64 }
                             }));
                             console.log('📤 [AUDIO] Enviado a Twilio');
                         } else {
@@ -357,8 +374,12 @@ function initGeminiToSpanish() {
                 for (const part of parts) {
                     if (part.inlineData && part.inlineData.data) {
                         console.log('🔊 [AUDIO] Recibido paquete de audio de Gemini [Español]');
-                        const convertedAudio = geminiToTwilio(part.inlineData.data);
-                        broadcastToBrowsers(convertedAudio.toString('base64'));
+                        let audioBase64 = part.inlineData.data;
+                        if (!audioBase64 || audioBase64.length === 0) {
+                            console.log('⚠️ Audio vacío, enviando silencio a navegador');
+                            audioBase64 = Buffer.alloc(160).toString('base64');
+                        }
+                        broadcastToBrowsers(audioBase64);
                         console.log('📤 [AUDIO] Enviado a navegadores');
                     }
                 }
@@ -396,18 +417,30 @@ wss.on('connection', (ws, req) => {
                 try {
                     const base64Str = message.toString();
                     const ulawBuffer = Buffer.from(base64Str, 'base64');
-                    const pcmBuffer = twilioToGemini(ulawBuffer); // Devuelve Buffer PCM 16kHz
+                    const pcmBuffer = twilioToGemini(ulawBuffer); // PCM 16kHz
                     
-                    // 1. Enviar a Gemini Live (audio a audio)
+                    // 1. Enviar a Gemini Live (traducción voz a voz)
                     geminiWsToEnglish.send(JSON.stringify({
                         realtimeInput: {
                             mediaChunks: [{ mimeType: "audio/pcm", data: pcmBuffer.toString('base64') }]
                         }
                     }));
 
-                    // 2. Acumular audio PCM para transcripción (NUEVO)
+                    // 2. Acumular audio para transcripción
                     audioBufferPCM = Buffer.concat([audioBufferPCM, pcmBuffer]);
-                    if (audioBufferPCM.length % (16000 * 2 * 10) === 0) { // Cada ~10 segundos
+                    
+                    // 3. Si el segmento supera los SEGMENT_DURATION segundos, transcribir
+                    if ((Date.now() - lastTranscriptionTime) > SEGMENT_DURATION * 1000) {
+                        if (audioBufferPCM.length > 0) {
+                            console.log(`🎤 [TRANSCRIPCIÓN] Segmento de ${(audioBufferPCM.length / (16000 * 2)).toFixed(1)} segundos`);
+                            transcribirAudioPCM(audioBufferPCM);
+                            audioBufferPCM = Buffer.alloc(0);
+                            lastTranscriptionTime = Date.now();
+                        }
+                    }
+                    
+                    // Log cada 10 segundos de audio acumulado
+                    if (audioBufferPCM.length % (16000 * 2 * 10) === 0 && audioBufferPCM.length > 0) {
                         console.log(`📊 Audio acumulado: ${(audioBufferPCM.length / (16000 * 2)).toFixed(1)} segundos`);
                     }
                 } catch (err) {
